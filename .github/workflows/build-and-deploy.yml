@@ -5,7 +5,7 @@ on:
   push:
     branches: [ "main" ]
 
-  # Run automatically after Nifty close (adjust if you want)
+  # Run automatically on weekdays (you can adjust time later)
   schedule:
     - cron: "15 10 * * 1-5"   # 10:15 UTC, Mon–Fri
 
@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-      - uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
