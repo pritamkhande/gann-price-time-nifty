@@ -1,11 +1,8 @@
 name: Build Gann Report & Deploy to Pages
 
 on:
-  # Run on every push to main
   push:
     branches: [ "main" ]
-
-  # Run automatically on weekdays (you can adjust time later)
   schedule:
     - cron: "15 10 * * 1-5"   # 10:15 UTC, Mon–Fri
 
