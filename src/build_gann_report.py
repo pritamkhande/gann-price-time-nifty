@@ -1,9 +1,8 @@
 import os
 from datetime import datetime
 
-import numpy as pd
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
 # ==========================
@@ -22,8 +21,8 @@ VOL_COL = "Volume"
 LOOKBACK_SWING = 3        # swing detection window (bars before/after)
 MAX_LOOKAHEAD = 120       # how many bars after swing to look for square
 SLOPE_TOL = 0.15          # |DeltaP/DeltaT - 1| <= 0.15
-SQUARE_DAYS = [25, 36, 49, 64, 81, 100, 121]
-DAY_TOL = 2               # allowed +- bars around SQUARE_DAYS
+SQUARE_NUMBERS = [25, 36, 49, 64, 81, 100, 121]
+NUMBER_TOL = 2            # allowed +- around SQUARE_NUMBERS
 ATR_PERIOD = 14
 R_MULTIPLIER = 2.0        # target = 2R
 RISK_PER_TRADE = 0.01     # 1% equity per trade
@@ -35,6 +34,7 @@ OUT_DD_PNG = "docs/gann_drawdown_curve.png"
 
 os.makedirs("data", exist_ok=True)
 os.makedirs("docs", exist_ok=True)
+
 
 # ==========================
 # DATA LOADING
@@ -54,6 +54,7 @@ def load_data():
     df = df[[DATE_COL, OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL, VOL_COL]]
     return df
 
+
 # ==========================
 # ATR
 # ==========================
@@ -72,6 +73,7 @@ def compute_atr(df, period=ATR_PERIOD):
     df["ATR"] = tr.rolling(period, min_periods=1).mean()
     return df
 
+
 # ==========================
 # SWING HIGHS / LOWS
 # ==========================
@@ -85,8 +87,8 @@ def detect_swings(df, lookback=LOOKBACK_SWING):
     highs = df[HIGH_COL].values
 
     for i in range(lookback, n - lookback):
-        window_lows = lows[i - lookback : i + lookback + 1]
-        window_highs = highs[i - lookback : i + lookback + 1]
+        window_lows = lows[i - lookback: i + lookback + 1]
+        window_highs = highs[i - lookback: i + lookback + 1]
 
         if lows[i] == window_lows.min():
             swing_low[i] = True
@@ -97,61 +99,97 @@ def detect_swings(df, lookback=LOOKBACK_SWING):
     df["swing_high"] = swing_high
     return df
 
+
 # ==========================
-# PRICE – TIME SQUARING
+# PRICE–TIME / PRICE–DATE SQUARES
 # ==========================
 
-def is_square_day(delta_t):
-    for s in SQUARE_DAYS:
-        if abs(delta_t - s) <= DAY_TOL:
+def is_square_number(n: int) -> bool:
+    for s in SQUARE_NUMBERS:
+        if abs(n - s) <= NUMBER_TOL:
             return True
     return False
+
+
+def classify_square(delta_points: float,
+                    delta_bars: int,
+                    delta_days: int) -> str | None:
+    """
+    Decide whether we have:
+    - time-based square (bars)
+    - date-based square (calendar days)
+    - both
+    Return "time", "date", "both" or None.
+    """
+    if delta_bars <= 0 or delta_days <= 0:
+        return None
+
+    slope_bars = delta_points / delta_bars
+    slope_days = delta_points / delta_days
+
+    time_ok = (abs(slope_bars - 1.0) <= SLOPE_TOL) and is_square_number(delta_bars)
+    date_ok = (abs(slope_days - 1.0) <= SLOPE_TOL) and is_square_number(delta_days)
+
+    if time_ok and date_ok:
+        return "both"
+    if time_ok:
+        return "time"
+    if date_ok:
+        return "date"
+    return None
+
 
 def find_square_from_swing_low(df, i0):
     """
     From swing low at index i0, look forward for first up-move
-    where price-time is "squared".
+    where price-time and/or price-date is squared.
+    Return (index, square_type) or (None, None).
     """
     n = len(df)
     p0 = df.loc[i0, CLOSE_COL]
+    d0 = df.loc[i0, DATE_COL]
 
     for t in range(i0 + 5, min(i0 + MAX_LOOKAHEAD, n)):
-        delta_t = t - i0
+        delta_bars = t - i0
+        d_t = df.loc[t, DATE_COL]
+        delta_days = (d_t - d0).days
+
         delta_p = df.loc[t, CLOSE_COL] - p0
-
-        # need up-move
         if delta_p <= 0:
-            continue
+            continue  # need up move
 
-        slope = delta_p / delta_t
+        sq_type = classify_square(abs(delta_p), delta_bars, delta_days)
+        if sq_type is not None:
+            return t, sq_type
 
-        if abs(slope - 1.0) <= SLOPE_TOL and is_square_day(delta_t):
-            return t
+    return None, None
 
-    return None
 
 def find_square_from_swing_high(df, i0):
     """
     From swing high at index i0, look forward for first down-move
-    where price-time is "squared".
+    where price-time and/or price-date is squared.
+    Return (index, square_type) or (None, None).
     """
     n = len(df)
     p0 = df.loc[i0, CLOSE_COL]
+    d0 = df.loc[i0, DATE_COL]
 
     for t in range(i0 + 5, min(i0 + MAX_LOOKAHEAD, n)):
-        delta_t = t - i0
+        delta_bars = t - i0
+        d_t = df.loc[t, DATE_COL]
+        delta_days = (d_t - d0).days
+
         delta_p = df.loc[t, CLOSE_COL] - p0
-
-        # need down-move
         if delta_p >= 0:
-            continue
+            continue  # need down move
 
-        slope = abs(delta_p) / delta_t
+        sq_type = classify_square(abs(delta_p), delta_bars, delta_days)
+        if sq_type is not None:
+            return t, sq_type
 
-        if abs(slope - 1.0) <= SLOPE_TOL and is_square_day(delta_t):
-            return t
+    return None, None
 
-    return None
 
 # ==========================
 # BACKTEST
@@ -165,6 +203,7 @@ def backtest(df):
     entry_price = None
     stop_price = None
     tp_price = None
+    entry_square_type = None
 
     trades = []
 
@@ -173,9 +212,9 @@ def backtest(df):
 
     while i < n - 2:
         if not in_trade:
-            # short setup from swing low (price-time squared up)
+            # short setup from swing low
             if df.loc[i, "swing_low"]:
-                sq_idx = find_square_from_swing_low(df, i)
+                sq_idx, sq_type = find_square_from_swing_low(df, i)
                 if sq_idx is not None and sq_idx < n - 1:
                     # bearish confirmation
                     if df.loc[sq_idx + 1, CLOSE_COL] < df.loc[sq_idx, LOW_COL]:
@@ -183,15 +222,16 @@ def backtest(df):
                         position = "short"
                         entry_idx = sq_idx + 1
                         entry_price = df.loc[entry_idx, OPEN_COL]
+                        entry_square_type = sq_type
                         sl = df.loc[sq_idx, HIGH_COL] + df.loc[sq_idx, "ATR"]
                         stop_price = sl
                         tp_price = entry_price - R_MULTIPLIER * (sl - entry_price)
                         i = entry_idx
                         continue
 
-            # long setup from swing high (price-time squared down)
+            # long setup from swing high
             if df.loc[i, "swing_high"]:
-                sq_idx = find_square_from_swing_high(df, i)
+                sq_idx, sq_type = find_square_from_swing_high(df, i)
                 if sq_idx is not None and sq_idx < n - 1:
                     # bullish confirmation
                     if df.loc[sq_idx + 1, CLOSE_COL] > df.loc[sq_idx, HIGH_COL]:
@@ -199,6 +239,7 @@ def backtest(df):
                         position = "long"
                         entry_idx = sq_idx + 1
                         entry_price = df.loc[entry_idx, OPEN_COL]
+                        entry_square_type = sq_type
                         sl = df.loc[sq_idx, LOW_COL] - df.loc[sq_idx, "ATR"]
                         stop_price = sl
                         tp_price = entry_price + R_MULTIPLIER * (entry_price - sl)
@@ -257,6 +298,7 @@ def backtest(df):
                     "R": float(r_mult),
                     "pnl": float(pnl),
                     "exit_reason": exit_reason,
+                    "square_type": entry_square_type,
                 })
 
                 risk_amount = equity * RISK_PER_TRADE
@@ -268,6 +310,7 @@ def backtest(df):
                 entry_price = None
                 stop_price = None
                 tp_price = None
+                entry_square_type = None
 
             i += 1
 
@@ -290,6 +333,7 @@ def backtest(df):
 
     return trades_df, df
 
+
 # ==========================
 # METRICS AND PLOTS
 # ==========================
@@ -305,6 +349,9 @@ def compute_metrics(trades_df, price_df):
             "start_date": None,
             "end_date": None,
             "years": 0.0,
+            "n_time": 0,
+            "n_date": 0,
+            "n_both": 0,
         }
 
     n_trades = len(trades_df)
@@ -329,6 +376,10 @@ def compute_metrics(trades_df, price_df):
     dd = (equity - peaks) / peaks
     max_dd = float(dd.min()) if len(dd) > 0 else 0.0
 
+    n_time = (trades_df["square_type"] == "time").sum()
+    n_date = (trades_df["square_type"] == "date").sum()
+    n_both = (trades_df["square_type"] == "both").sum()
+
     return {
         "n_trades": n_trades,
         "win_rate": win_rate,
@@ -338,7 +389,11 @@ def compute_metrics(trades_df, price_df):
         "start_date": start_date,
         "end_date": end_date,
         "years": years,
+        "n_time": int(n_time),
+        "n_date": int(n_date),
+        "n_both": int(n_both),
     }
+
 
 def make_plots(price_df):
     eq = price_df.dropna(subset=["equity"])
@@ -351,7 +406,7 @@ def make_plots(price_df):
     # equity curve
     plt.figure(figsize=(9, 4))
     plt.plot(dates, equity)
-    plt.title("Gann Price–Time Squaring – Equity Curve (Nifty)")
+    plt.title("Gann Price–Time / Price–Date Squaring – Equity Curve (Nifty)")
     plt.xlabel("Date")
     plt.ylabel("Equity (normalized)")
     plt.tight_layout()
@@ -371,6 +426,7 @@ def make_plots(price_df):
     plt.savefig(OUT_DD_PNG)
     plt.close()
 
+
 # ==========================
 # HTML REPORT
 # ==========================
@@ -384,9 +440,9 @@ def render_html(metrics, trades_df):
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Nifty – Gann Price-Time Squaring System</title>
+  <title>Nifty – Gann Price-Time / Price-Date Squaring System</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Mechanical Gann Price-Time Squaring backtest on Nifty daily data.">
+  <meta name="description" content="Mechanical Gann Price-Time and Price-Date Squaring backtest on Nifty daily data.">
   <style>
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -454,9 +510,9 @@ def render_html(metrics, trades_df):
 </head>
 <body>
 
-  <h1>Nifty – Gann Price-Time Squaring System</h1>
+  <h1>Nifty – Gann Price-Time / Price-Date Squaring System</h1>
   <p>
-    Fully mechanical backtest of a Price-Time Squaring system inspired by W.D. Gann,
+    Fully mechanical backtest of a Price-Time and Price-Date Squaring system inspired by W.D. Gann,
     applied to Nifty daily data from {start_str} to {end_str}.
   </p>
 
@@ -491,34 +547,67 @@ def render_html(metrics, trades_df):
   </div>
 
   <div class="card">
+    <h2>Price-Time vs Price-Date Squares</h2>
+    <table>
+      <tr>
+        <th>Square type</th>
+        <th>Count</th>
+      </tr>
+      <tr>
+        <td>Time only (trading bars)</td>
+        <td>{metrics["n_time"]}</td>
+      </tr>
+      <tr>
+        <td>Date only (calendar days)</td>
+        <td>{metrics["n_date"]}</td>
+      </tr>
+      <tr>
+        <td>Both time and date aligned</td>
+        <td>{metrics["n_both"]}</td>
+      </tr>
+    </table>
+    <p>
+      Each trade is opened from a swing where the price move (points) is approximately equal to
+      either the number of trading bars since that swing (Price–Time square),
+      the number of calendar days since that swing (Price–Date square),
+      or both.
+    </p>
+  </div>
+
+  <div class="card">
     <h2>System Logic</h2>
     <h3>1. Swing points</h3>
     <ul>
       <li>Timeframe: daily Nifty OHLC data.</li>
-      <li>Swing low: bar whose low is the lowest in a +- {LOOKBACK_SWING}-bar window.</li>
-      <li>Swing high: bar whose high is the highest in a +- {LOOKBACK_SWING}-bar window.</li>
+      <li>Swing low: bar whose low is the lowest in a ± {LOOKBACK_SWING}-bar window.</li>
+      <li>Swing high: bar whose high is the highest in a ± {LOOKBACK_SWING}-bar window.</li>
     </ul>
 
-    <h3>2. Price-Time Squaring condition</h3>
+    <h3>2. Price-Time / Price-Date Squaring</h3>
     <ul>
       <li>From each swing, scan forward up to {MAX_LOOKAHEAD} bars.</li>
-      <li>Let DeltaT = bars since swing, DeltaP = price change in points.</li>
-      <li>Define slope = DeltaP / DeltaT (absolute for down moves).</li>
-      <li>Price-time is "squared" when:
+      <li>Let ΔP = |Close - swing close| in points.</li>
+      <li>Let ΔBars = bars since swing, ΔDays = calendar days since swing.</li>
+      <li>Price-Time square if:
         <ul>
-          <li>|slope - 1| <= {SLOPE_TOL} (points per bar about 1), and</li>
-          <li>DeltaT is within +- {DAY_TOL} bars of any of: {SQUARE_DAYS}.</li>
+          <li>|ΔP/ΔBars − 1| ≤ {SLOPE_TOL}, and</li>
+          <li>ΔBars close to one of {SQUARE_NUMBERS} (±{NUMBER_TOL}).</li>
         </ul>
       </li>
-      <li>From swing low: squared zone treated as potential top (short setup).</li>
-      <li>From swing high: squared zone treated as potential bottom (long setup).</li>
+      <li>Price-Date square if:
+        <ul>
+          <li>|ΔP/ΔDays − 1| ≤ {SLOPE_TOL}, and</li>
+          <li>ΔDays close to one of {SQUARE_NUMBERS} (±{NUMBER_TOL}).</li>
+        </ul>
+      </li>
+      <li>A setup is valid if either Time, Date, or both conditions are satisfied.</li>
     </ul>
 
     <h3>3. Entries and exits</h3>
     <ul>
-      <li>Short: after squared up-zone, if next bar closes below its low, open short at next open.</li>
-      <li>Long: after squared down-zone, if next bar closes above its high, open long at next open.</li>
-      <li>Stop loss: square bar high/low plus/minus ATR(14).</li>
+      <li>Short: from swing low squared up, if next bar closes below its low, open short at next open.</li>
+      <li>Long: from swing high squared down, if next bar closes above its high, open long at next open.</li>
+      <li>Stop loss: square bar high/low ± ATR(14).</li>
       <li>Target: {R_MULTIPLIER} R (R = initial risk per share).</li>
       <li>Risk per trade: {RISK_PER_TRADE*100:.0f}% of equity. One position at a time.</li>
     </ul>
@@ -541,6 +630,7 @@ def render_html(metrics, trades_df):
         <th>Exit date</th>
         <th>Side</th>
         <th>R</th>
+        <th>Square type</th>
         <th>Exit reason</th>
       </tr>
 """
@@ -553,6 +643,7 @@ def render_html(metrics, trades_df):
         <td>{row['exit_date'].strftime('%Y-%m-%d')}</td>
         <td>{row['position']}</td>
         <td>{row['R']:.2f}</td>
+        <td>{row.get('square_type', '')}</td>
         <td>{row['exit_reason']}</td>
       </tr>
 """
@@ -570,6 +661,7 @@ def render_html(metrics, trades_df):
 </html>
 """
     return html
+
 
 # ==========================
 # MAIN
@@ -592,6 +684,7 @@ def main():
 
     print("Report written to", OUT_REPORT_HTML)
     print("Trades CSV:", OUT_TRADES_CSV)
+
 
 if __name__ == "__main__":
     main()
