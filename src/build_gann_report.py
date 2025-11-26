@@ -145,7 +145,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
             exit_price = None
 
             if position == "long":
-                # SL (trailing) hit?
                 if low <= stop_price:
                     exit_price = stop_price
                     exit_reason = "SL"
@@ -169,22 +168,24 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                 r_mult = pnl / risk if risk != 0 else 0.0
 
-                trades.append({
-                    "trade_no": len(trades) + 1,
-                    "entry_index": entry_idx,
-                    "exit_index": i,
-                    "entry_date": df.loc[entry_idx, DATE_COL],
-                    "exit_date": date,
-                    "position": position,
-                    "entry_price": float(entry_price),
-                    "exit_price": float(exit_price),
-                    "initial_stop_price": float(initial_stop_price),
-                    "final_stop_price": float(stop_price),
-                    "R": float(r_mult),
-                    "pnl": float(pnl),
-                    "exit_reason": exit_reason,
-                    "square_type": entry_square_type,
-                })
+                trades.append(
+                    {
+                        "trade_no": len(trades) + 1,
+                        "entry_index": entry_idx,
+                        "exit_index": i,
+                        "entry_date": df.loc[entry_idx, DATE_COL],
+                        "exit_date": date,
+                        "position": position,
+                        "entry_price": float(entry_price),
+                        "exit_price": float(exit_price),
+                        "initial_stop_price": float(initial_stop_price),
+                        "final_stop_price": float(stop_price),
+                        "R": float(r_mult),
+                        "pnl": float(pnl),
+                        "exit_reason": exit_reason,
+                        "square_type": entry_square_type,
+                    }
+                )
 
                 # equity update with 2% risk
                 risk_amount = equity * RISK_PER_TRADE
@@ -221,7 +222,7 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 # ==========================
-# METRICS
+# METRICS & COMMENTARY
 # ==========================
 
 def compute_metrics(trades_df: pd.DataFrame, price_df: pd.DataFrame) -> dict:
@@ -270,11 +271,63 @@ def compute_metrics(trades_df: pd.DataFrame, price_df: pd.DataFrame) -> dict:
     }
 
 
+def build_system_commentary(metrics: dict, trades_df: pd.DataFrame) -> str:
+    n = metrics["n_trades"]
+    years = metrics["years"] or 0.0
+    avg_R = metrics["avg_R"]
+    win_rate = metrics["win_rate"]
+    cagr = metrics["cagr"] * 100
+    max_dd = metrics["max_dd"] * 100
+
+    if years > 0:
+        trades_per_year = n / years
+    else:
+        trades_per_year = 0.0
+
+    if trades_df.empty:
+        return "No trades were generated. The current parameter set is too strict for this dataset."
+
+    avg_hold = (trades_df["exit_index"] - trades_df["entry_index"]).mean()
+
+    style = []
+    if trades_per_year < 5:
+        style.append("very selective, long-term system")
+    elif trades_per_year < 15:
+        style.append("moderately active swing system")
+    else:
+        style.append("active swing/position system")
+
+    if max_dd < 5:
+        style.append("with very conservative risk")
+    elif max_dd < 12:
+        style.append("with moderate risk")
+    else:
+        style.append("with aggressive risk")
+
+    if cagr < 2:
+        style.append("designed more for research than raw returns")
+    elif cagr < 8:
+        style.append("balanced between robustness and return")
+    else:
+        style.append("tilted towards maximising return")
+
+    style_txt = ", ".join(style)
+
+    return (
+        f"The system generated {n} trades over the full sample, averaging "
+        f"about {trades_per_year:.1f} trades per year. The typical holding "
+        f"period is around {avg_hold:.1f} bars. With a win rate of "
+        f"{win_rate:.1f}% and an average outcome of {avg_R:.2f}R per trade, "
+        f"the equity curve grows at roughly {cagr:.1f}% CAGR while suffering "
+        f"a maximum drawdown of {max_dd:.1f}%. Overall, this behaves like a {style_txt}."
+    )
+
+
 # ==========================
 # HTML REPORT
 # ==========================
 
-def render_html(metrics: dict, trades_df: pd.DataFrame) -> str:
+def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
     start_str = metrics["start_date"].strftime("%d-%m-%Y") if metrics["start_date"] else "N/A"
     end_str = metrics["end_date"].strftime("%d-%m-%Y") if metrics["end_date"] else "N/A"
     years_str = f"{metrics['years']:.1f}" if metrics["years"] else "N/A"
@@ -397,6 +450,11 @@ def render_html(metrics: dict, trades_df: pd.DataFrame) -> str:
   </div>
 
   <div class="card">
+    <h2>System Behaviour Commentary</h2>
+    <p>{commentary}</p>
+  </div>
+
+  <div class="card">
     <h2>Equity Curve and Drawdown</h2>
     <p>Equity starts at 1.0 and changes based on realized R-multiples with 2% risk per trade.</p>
     <img src="gann_equity_curve.png" alt="Equity curve">
@@ -488,12 +546,14 @@ def main():
     trades_df.to_csv(OUT_TRADES_CSV, index=False)
 
     metrics = compute_metrics(trades_df, price_df)
+    commentary = build_system_commentary(metrics, trades_df)
+
     make_equity_and_dd_plots(price_df, DATE_COL, "equity", OUT_EQUITY_PNG, OUT_DD_PNG)
 
-    # Generate per-trade interactive charts
+    # Generate per-trade interactive charts + commentary
     generate_trade_charts(price_df, trades_df, DATE_COL, OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL)
 
-    html = render_html(metrics, trades_df)
+    html = render_html(metrics, trades_df, commentary)
     with open(OUT_REPORT_HTML, "w", encoding="utf-8") as f:
         f.write(html)
 
