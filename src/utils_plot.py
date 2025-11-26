@@ -1,17 +1,19 @@
 import os
 from typing import Optional
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
 
-def make_equity_and_dd_plots(df: pd.DataFrame,
-                             date_col: str,
-                             equity_col: str,
-                             out_equity_png: str,
-                             out_dd_png: str) -> None:
+def make_equity_and_dd_plots(
+    df: pd.DataFrame,
+    date_col: str,
+    equity_col: str,
+    out_equity_png: str,
+    out_dd_png: str,
+) -> None:
     eq = df.dropna(subset=[equity_col])
     if eq.empty:
         return
@@ -43,19 +45,53 @@ def make_equity_and_dd_plots(df: pd.DataFrame,
     plt.close()
 
 
-def create_trade_chart(price_df: pd.DataFrame,
-                       trade: pd.Series,
-                       date_col: str,
-                       open_col: str,
-                       high_col: str,
-                       low_col: str,
-                       close_col: str,
-                       out_html_path: str,
-                       bars_before: int = 40,
-                       bars_after: int = 20) -> None:
+def _build_trade_commentary(trade: pd.Series) -> str:
+    side = trade["position"]
+    r = trade["R"]
+    sq_type = trade.get("square_type", "")
+    exit_reason = trade["exit_reason"]
+    duration_bars = int(trade["exit_index"]) - int(trade["entry_index"])
+    dur_txt = f"{duration_bars} bars"
+
+    if r > 1.5:
+        perf = "strong winner"
+    elif r > 0:
+        perf = "modest winner"
+    elif r > -0.5:
+        perf = "small loss"
+    else:
+        perf = "larger loss"
+
+    sq_txt = {
+        "time": "Price–Time square (bars)",
+        "date": "Price–Date square (calendar days)",
+        "both": "Price–Time and Price–Date square in alignment",
+        None: "Gann square",
+        "": "Gann square",
+    }.get(sq_type, "Gann square")
+
+    return (
+        f"This {side} trade was triggered from a {sq_txt} setup. "
+        f"It stayed open for {dur_txt} and closed as a {perf} with {r:.2f}R. "
+        f"The exit happened due to '{exit_reason}' (stop/forced exit logic)."
+    )
+
+
+def create_trade_chart(
+    price_df: pd.DataFrame,
+    trade: pd.Series,
+    date_col: str,
+    open_col: str,
+    high_col: str,
+    low_col: str,
+    close_col: str,
+    out_html_path: str,
+    bars_before: int = 40,
+    bars_after: int = 20,
+) -> None:
     """
-    Creates a Plotly candlestick chart around a single trade and writes it to HTML.
-    Looks like a mini-TradingView chart with entry/exit markers and stop lines.
+    Creates a Plotly candlestick chart around a single trade and writes a full
+    HTML page with chart + commentary.
     """
 
     entry_idx = int(trade["entry_index"])
@@ -64,7 +100,7 @@ def create_trade_chart(price_df: pd.DataFrame,
     start_idx = max(0, entry_idx - bars_before)
     end_idx = min(len(price_df) - 1, exit_idx + bars_after)
 
-    sub = price_df.iloc[start_idx:end_idx + 1].copy()
+    sub = price_df.iloc[start_idx : end_idx + 1].copy()
 
     fig = go.Figure(
         data=[
@@ -115,7 +151,6 @@ def create_trade_chart(price_df: pd.DataFrame,
         annotation_position="bottom left",
     )
 
-    # layout
     fig.update_layout(
         title=f"Trade {int(trade['trade_no'])} – {trade['position']} ({trade['square_type']})",
         xaxis_title="Date",
@@ -126,18 +161,66 @@ def create_trade_chart(price_df: pd.DataFrame,
         height=500,
     )
 
+    # Build full HTML page with commentary
+    fig_html = fig.to_html(include_plotlyjs="cdn", full_html=False)
+    commentary = _build_trade_commentary(trade)
+    entry_date = trade["entry_date"].strftime("%d-%m-%Y")
+    exit_date = trade["exit_date"].strftime("%d-%m-%Y")
+    r = trade["R"]
+
+    full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trade {int(trade['trade_no'])} – Gann Squaring (Nifty)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 16px;
+      background: #f7f7f9;
+      color: #111827;
+      line-height: 1.5;
+    }}
+    .card {{
+      background: #ffffff;
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    }}
+  </style>
+</head>
+<body>
+  <h1>Trade {int(trade['trade_no'])} – Gann Squaring (Nifty)</h1>
+  <p><strong>{trade['position'].capitalize()}</strong> trade from {entry_date} to {exit_date}, result: {r:.2f}R.</p>
+  <div class="card">
+    <p>{commentary}</p>
+  </div>
+  <div class="card">
+    {fig_html}
+  </div>
+</body>
+</html>
+"""
+
     os.makedirs(os.path.dirname(out_html_path), exist_ok=True)
-    fig.write_html(out_html_path, include_plotlyjs="cdn")
+    with open(out_html_path, "w", encoding="utf-8") as f:
+        f.write(full_html)
 
 
-def generate_trade_charts(price_df: pd.DataFrame,
-                          trades_df: pd.DataFrame,
-                          date_col: str,
-                          open_col: str,
-                          high_col: str,
-                          low_col: str,
-                          close_col: str,
-                          out_dir: str = "docs/trades") -> None:
+def generate_trade_charts(
+    price_df: pd.DataFrame,
+    trades_df: pd.DataFrame,
+    date_col: str,
+    open_col: str,
+    high_col: str,
+    low_col: str,
+    close_col: str,
+    out_dir: str = "docs/trades",
+) -> None:
     if trades_df.empty:
         return
 
