@@ -27,6 +27,29 @@ def load_data():
     return df
 
 
+def build_signal_comment(signal: dict) -> str:
+    if not signal["has_signal"]:
+        return (
+            "No fresh Gann Price-Time or Price-Date Square was detected near the most recent bars. "
+            "When the system does not see a clean square, it simply stays flat and waits for the next balance "
+            "between price and time/date."
+        )
+
+    dir_txt = "potential short (downside) setup" if "down" in signal["direction"] else "potential long (upside) setup"
+    sq_map = {
+        "time": "a Price–Time square (bars)",
+        "date": "a Price–Date square (calendar days)",
+        "both": "both Price–Time and Price–Date squares lining up",
+    }
+    sq_txt = sq_map.get(signal["square_type"], "a Gann squaring condition")
+
+    return (
+        f"The scanner has identified {sq_txt} near the latest bars, creating a {dir_txt}. "
+        "This does not guarantee reversal, but historically these conditions often mark turning zones. "
+        "Always combine this with broader market context and risk management."
+    )
+
+
 def main():
     os.makedirs("docs", exist_ok=True)
     df = load_data()
@@ -36,7 +59,6 @@ def main():
     last_idx = n - 1
     last_date = df.loc[last_idx, DATE_COL].strftime("%d-%m-%Y")
 
-    # Check most recent swing within last 30 bars
     signal = {
         "has_signal": False,
         "type": None,
@@ -47,33 +69,40 @@ def main():
         "date": last_date,
     }
 
-    for i in range(max(0, n - 30), n - 5):
+    # Check most recent swing within last 40 bars
+    for i in range(max(0, n - 40), n - 5):
         if df.loc[i, "swing_low"]:
             sq_idx, sq_type = find_square_from_swing_low(df, i, DATE_COL, CLOSE_COL)
             if sq_idx is not None and sq_idx >= n - 5:
-                signal.update({
-                    "has_signal": True,
-                    "type": "swing_low",
-                    "square_type": sq_type,
-                    "direction": "down (short setup)",
-                    "swing_index": int(i),
-                    "square_index": int(sq_idx),
-                })
+                signal.update(
+                    {
+                        "has_signal": True,
+                        "type": "swing_low",
+                        "square_type": sq_type,
+                        "direction": "down (short setup)",
+                        "swing_index": int(i),
+                        "square_index": int(sq_idx),
+                    }
+                )
         if df.loc[i, "swing_high"]:
             sq_idx, sq_type = find_square_from_swing_high(df, i, DATE_COL, CLOSE_COL)
             if sq_idx is not None and sq_idx >= n - 5:
-                signal.update({
-                    "has_signal": True,
-                    "type": "swing_high",
-                    "square_type": sq_type,
-                    "direction": "up (long setup)",
-                    "swing_index": int(i),
-                    "square_index": int(sq_idx),
-                })
+                signal.update(
+                    {
+                        "has_signal": True,
+                        "type": "swing_high",
+                        "square_type": sq_type,
+                        "direction": "up (long setup)",
+                        "swing_index": int(i),
+                        "square_index": int(sq_idx),
+                    }
+                )
 
     # Write JSON
     os.makedirs("data", exist_ok=True)
     pd.Series(signal).to_json(OUT_JSON, indent=2)
+
+    comment = build_signal_comment(signal)
 
     # Write mini HTML
     html = f"""<!DOCTYPE html>
@@ -107,9 +136,9 @@ def main():
 """
 
     if not signal["has_signal"]:
-        html += """
+        html += f"""
   <div class="card">
-    <p>No fresh Gann Price-Time or Price-Date Square detected around the most recent bars.</p>
+    <p>{comment}</p>
   </div>
 </body>
 </html>
@@ -125,8 +154,7 @@ def main():
       <li>Swing index: {signal["swing_index"]}</li>
       <li>Square index: {signal["square_index"]}</li>
     </ul>
-    <p>Interpretation: the system sees a recent Gann square near current price levels. 
-       Use the full backtest page for context before any trading decision.</p>
+    <p>{comment}</p>
   </div>
 </body>
 </html>
