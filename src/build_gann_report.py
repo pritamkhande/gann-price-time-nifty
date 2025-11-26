@@ -1,11 +1,3 @@
-
----
-
-## 4. Main script: `src/build_gann_report.py`
-
-Create this file with the following code (copy–paste as is, then adjust CSV column names if required):
-
-```python
 import os
 import numpy as np
 import pandas as pd
