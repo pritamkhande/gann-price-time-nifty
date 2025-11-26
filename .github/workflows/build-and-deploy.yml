@@ -1,13 +1,13 @@
 name: Build Gann Report & Deploy to Pages
 
 on:
-  # Run when you push to main
+  # Run on every push to main
   push:
     branches: [ "main" ]
 
-  # Optional: run every night at 2:00 UTC
+  # Run automatically after Nifty close (adjust if you want)
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "15 10 * * 1-5"   # 10:15 UTC, Mon–Fri
 
 permissions:
   contents: write
@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,11 +36,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Gann backtest & generate report
+      - name: Run Gann backtest, charts & today scanner
         run: |
           python src/build_gann_report.py
+          python src/scan_today.py
 
-      # Upload the docs/ directory as artifact for Pages
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -52,6 +52,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
