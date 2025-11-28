@@ -63,6 +63,40 @@ def compute_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
 
 
 # ==========================
+# HELPERS
+# ==========================
+
+def calc_forward_point_profits(
+    df: pd.DataFrame,
+    entry_idx: int,
+    entry_price: float,
+    position: str,
+    max_horizon: int = 4,
+) -> list[float]:
+    """
+    For a given entry, compute profit in points if we exit at:
+      T   = entry day close
+      T+1 = close on next bar
+      ...
+      T+4 = close 4 bars after entry
+    Returns list [pts_T, pts_T1, pts_T2, pts_T3, pts_T4]
+    """
+    sign = 1.0 if position == "long" else -1.0
+    pnls = []
+    n = len(df)
+
+    for k in range(0, max_horizon + 1):
+        idx = entry_idx + k
+        if idx >= n:
+            pnls.append(np.nan)
+        else:
+            close_k = df.loc[idx, CLOSE_COL]
+            pnl_pts = sign * (close_k - entry_price)
+            pnls.append(float(pnl_pts))
+    return pnls
+
+
+# ==========================
 # BACKTEST WITH TRAILING STOP
 # ==========================
 
@@ -174,6 +208,11 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                 r_mult = pnl / risk if risk != 0 else 0.0
 
+                # forward point profits T, T+1, ..., T+4
+                pts_T, pts_T1, pts_T2, pts_T3, pts_T4 = calc_forward_point_profits(
+                    df, entry_idx, entry_price, position, max_horizon=4
+                )
+
                 trades.append(
                     {
                         "trade_no": len(trades) + 1,
@@ -192,6 +231,11 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "pnl": float(pnl),
                         "exit_reason": exit_reason,
                         "square_type": entry_square_type,
+                        "pts_T": pts_T,
+                        "pts_T1": pts_T1,
+                        "pts_T2": pts_T2,
+                        "pts_T3": pts_T3,
+                        "pts_T4": pts_T4,
                     }
                 )
 
@@ -374,11 +418,13 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
       border-collapse: collapse;
       margin-top: 8px;
       font-size: 14px;
+      table-layout: auto;
     }}
     th, td {{
       padding: 6px 8px;
       border-bottom: 1px solid #e5e7eb;
       text-align: left;
+      white-space: nowrap;
     }}
     th {{
       background: #f3f4f6;
@@ -499,7 +545,7 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
   </div>
 
   <div class="card">
-    <h2>All Trades</h2>
+    <h2>All Trades (with forward point profits)</h2>
     <table>
       <tr>
         <th>#</th>
@@ -511,10 +557,14 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <th>R</th>
         <th>Square type</th>
         <th>Exit reason</th>
+        <th>T (pts)</th>
+        <th>T+1</th>
+        <th>T+2</th>
+        <th>T+3</th>
+        <th>T+4</th>
         <th>Chart</th>
       </tr>
 """
-    # show all trades
     for _, row in trades_df.iterrows():
         trade_no = int(row["trade_no"])
         sig_date = row["signal_date"].strftime('%Y-%m-%d') if pd.notna(row["signal_date"]) else "NA"
@@ -529,6 +579,11 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <td>{row['R']:.2f}</td>
         <td>{row['square_type']}</td>
         <td>{row['exit_reason']}</td>
+        <td>{row['pts_T']:.2f}</td>
+        <td>{row['pts_T1']:.2f}</td>
+        <td>{row['pts_T2']:.2f}</td>
+        <td>{row['pts_T3']:.2f}</td>
+        <td>{row['pts_T4']:.2f}</td>
         <td><a class="trade-link" href="trades/trade_{trade_no:03d}.html" target="_blank">View</a></td>
       </tr>
 """
