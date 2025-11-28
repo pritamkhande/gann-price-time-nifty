@@ -13,6 +13,7 @@ from utils_plot import make_equity_and_dd_plots, generate_trade_charts
 # ==========================
 
 DATA_PATH = "data/nifty_daily.csv"
+EARLY_DATA_PATH = "Early_Data/nifty_early_close.csv"  # NEW – early close data
 
 DATE_COL = "Date"
 OPEN_COL = "Open"
@@ -62,8 +63,31 @@ def compute_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
     return df
 
 
+def load_early_close() -> pd.DataFrame | None:
+    """
+    Load early close data (~10–15 minutes before market close) if available.
+
+    Expected CSV format (Early_Data/nifty_early_close.csv):
+
+        Date,EarlyClose
+        01-01-2000,1450.25
+        03-01-2000,1462.10
+        ...
+
+    Date must match main data by calendar date.
+    """
+    if not os.path.exists(EARLY_DATA_PATH):
+        return None
+
+    edf = pd.read_csv(EARLY_DATA_PATH)
+    edf[DATE_COL] = pd.to_datetime(edf[DATE_COL], dayfirst=True, errors="coerce")
+    edf = edf.dropna(subset=[DATE_COL, "EarlyClose"])
+    edf = edf.sort_values(DATE_COL).reset_index(drop=True)
+    return edf
+
+
 # ==========================
-# HELPERS
+# HELPERS – POINT PROFITS AROUND SIGNAL
 # ==========================
 
 def calc_forward_point_profits(
@@ -306,6 +330,75 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 # ==========================
+# EARLY-CLOSE MARGINS
+# ==========================
+
+def attach_early_margins(
+    trades_df: pd.DataFrame,
+    price_df: pd.DataFrame,
+    early_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    For each trade, compute:
+
+    - early_close: approx. close 10–15 min before final close on the entry bar
+    - margin_neutral_pts / margin_neutral_pct:
+        how much price can move before today's signal is lost (long->neutral or short->neutral)
+    - margin_flip_pts / margin_flip_pct:
+        how much price must move to flip bias to the opposite side (long->short or short->long)
+    """
+    early_map = early_df.set_index(DATE_COL)["EarlyClose"]
+
+    early_closes = []
+    m_neutral_pts = []
+    m_neutral_pct = []
+    m_flip_pts = []
+    m_flip_pct = []
+
+    for _, tr in trades_df.iterrows():
+        entry_date = tr["entry_date"]
+        pos = tr["position"]
+        sig_idx = int(tr["signal_index"])
+
+        ec = early_map.get(entry_date, np.nan)
+        early_closes.append(ec)
+
+        if pd.isna(ec):
+            m_neutral_pts.append(np.nan)
+            m_neutral_pct.append(np.nan)
+            m_flip_pts.append(np.nan)
+            m_flip_pct.append(np.nan)
+            continue
+
+        sq_high = price_df.loc[sig_idx, HIGH_COL]
+        sq_low = price_df.loc[sig_idx, LOW_COL]
+
+        if pos == "long":
+            # margin before long loses confirmation (back to neutral)
+            buf_neutral_pts = ec - sq_high
+            # margin required to go below square low (strong short zone)
+            buf_flip_pts = ec - sq_low
+        else:  # short
+            # margin before short loses confirmation (back to neutral)
+            buf_neutral_pts = sq_low - ec
+            # margin required to go above square high (strong long zone)
+            buf_flip_pts = sq_high - ec
+
+        m_neutral_pts.append(float(buf_neutral_pts))
+        m_flip_pts.append(float(buf_flip_pts))
+        m_neutral_pct.append(100.0 * buf_neutral_pts / ec)
+        m_flip_pct.append(100.0 * buf_flip_pts / ec)
+
+    trades_df = trades_df.copy()
+    trades_df["early_close"] = early_closes
+    trades_df["margin_neutral_pts"] = m_neutral_pts
+    trades_df["margin_neutral_pct"] = m_neutral_pct
+    trades_df["margin_flip_pts"] = m_flip_pts
+    trades_df["margin_flip_pct"] = m_flip_pct
+    return trades_df
+
+
+# ==========================
 # METRICS & COMMENTARY
 # ==========================
 
@@ -447,7 +540,7 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
       width: 100%;
       border-collapse: collapse;
       margin-top: 8px;
-      font-size: 14px;
+      font-size: 13px;
       table-layout: auto;
     }}
     th, td {{
@@ -575,7 +668,7 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
   </div>
 
   <div class="card">
-    <h2>All Trades (with point profits around the signal)</h2>
+    <h2>All Trades (point profits + early-close margins)</h2>
     <table>
       <tr>
         <th>#</th>
@@ -593,12 +686,24 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <th>T+2</th>
         <th>T+3</th>
         <th>T+4</th>
+        <th>Early close</th>
+        <th>Margin neutral (pts)</th>
+        <th>Margin neutral (%)</th>
+        <th>Margin flip (pts)</th>
+        <th>Margin flip (%)</th>
         <th>Chart</th>
       </tr>
 """
     for _, row in trades_df.iterrows():
         trade_no = int(row["trade_no"])
         sig_date = row["signal_date"].strftime('%Y-%m-%d') if pd.notna(row["signal_date"]) else "NA"
+
+        ec = row.get("early_close", np.nan)
+        mn_pts = row.get("margin_neutral_pts", np.nan)
+        mn_pct = row.get("margin_neutral_pct", np.nan)
+        mf_pts = row.get("margin_flip_pts", np.nan)
+        mf_pct = row.get("margin_flip_pct", np.nan)
+
         html += f"""
       <tr>
         <td>{trade_no}</td>
@@ -616,6 +721,11 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <td>{row['pts_T2']:.2f}</td>
         <td>{row['pts_T3']:.2f}</td>
         <td>{row['pts_T4']:.2f}</td>
+        <td>{"" if pd.isna(ec) else f"{ec:.2f}"}</td>
+        <td>{"" if pd.isna(mn_pts) else f"{mn_pts:.2f}"}</td>
+        <td>{"" if pd.isna(mn_pct) else f"{mn_pct:.2f}%"}</td>
+        <td>{"" if pd.isna(mf_pts) else f"{mf_pts:.2f}"}</td>
+        <td>{"" if pd.isna(mf_pct) else f"{mf_pct:.2f}%"}</td>
         <td><a class="trade-link" href="trades/trade_{trade_no:03d}.html" target="_blank">View</a></td>
       </tr>
 """
@@ -645,6 +755,12 @@ def main():
     df = detect_swings(df, low_col=LOW_COL, high_col=HIGH_COL, lookback_main=1, lookback_fractal=2)
 
     trades_df, price_df = backtest(df)
+
+    # Attach early-close margins if Early_Data is available
+    early_df = load_early_close()
+    if early_df is not None:
+        trades_df = attach_early_margins(trades_df, price_df, early_df)
+
     trades_df.to_csv(OUT_TRADES_CSV, index=False)
 
     metrics = compute_metrics(trades_df, price_df)
