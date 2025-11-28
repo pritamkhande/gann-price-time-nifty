@@ -75,6 +75,8 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     stop_price = None
     initial_stop_price = None
     entry_square_type = None
+    signal_idx = None
+    signal_date = None
 
     trades = []
 
@@ -99,6 +101,8 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         sl = df.loc[sq_idx, HIGH_COL] + 2 * df.loc[sq_idx, "ATR"]
                         stop_price = sl
                         initial_stop_price = sl
+                        signal_idx = sq_idx
+                        signal_date = df.loc[sq_idx, DATE_COL]
                         i = entry_idx
                         continue
 
@@ -118,6 +122,8 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         sl = df.loc[sq_idx, LOW_COL] - 2 * df.loc[sq_idx, "ATR"]
                         stop_price = sl
                         initial_stop_price = sl
+                        signal_idx = sq_idx
+                        signal_date = df.loc[sq_idx, DATE_COL]
                         i = entry_idx
                         continue
 
@@ -171,6 +177,8 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                 trades.append(
                     {
                         "trade_no": len(trades) + 1,
+                        "signal_index": signal_idx,
+                        "signal_date": signal_date,
                         "entry_index": entry_idx,
                         "exit_index": i,
                         "entry_date": df.loc[entry_idx, DATE_COL],
@@ -198,6 +206,8 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                 stop_price = None
                 initial_stop_price = None
                 entry_square_type = None
+                signal_idx = None
+                signal_date = None
 
             i += 1
 
@@ -489,11 +499,13 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
   </div>
 
   <div class="card">
-    <h2>Sample Trades (first 10)</h2>
+    <h2>All Trades</h2>
     <table>
       <tr>
         <th>#</th>
+        <th>Signal date</th>
         <th>Entry date</th>
+        <th>Entry price</th>
         <th>Exit date</th>
         <th>Side</th>
         <th>R</th>
@@ -502,13 +514,16 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <th>Chart</th>
       </tr>
 """
-    sample = trades_df.head(10)
-    for _, row in sample.iterrows():
+    # show all trades
+    for _, row in trades_df.iterrows():
         trade_no = int(row["trade_no"])
+        sig_date = row["signal_date"].strftime('%Y-%m-%d') if pd.notna(row["signal_date"]) else "NA"
         html += f"""
       <tr>
         <td>{trade_no}</td>
+        <td>{sig_date}</td>
         <td>{row['entry_date'].strftime('%Y-%m-%d')}</td>
+        <td>{row['entry_price']:.2f}</td>
         <td>{row['exit_date'].strftime('%Y-%m-%d')}</td>
         <td>{row['position']}</td>
         <td>{row['R']:.2f}</td>
