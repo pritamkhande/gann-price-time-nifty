@@ -96,6 +96,32 @@ def calc_forward_point_profits(
     return pnls
 
 
+def calc_tminus1_profit(
+    df: pd.DataFrame,
+    signal_idx: int | None,
+    position: str,
+) -> float:
+    """
+    Profit in points if we hypothetically:
+      - ENTER at signal bar close (where square is detected)
+      - EXIT at next bar close (the bar where we actually enter at open)
+
+    This is labelled T(-1).
+    """
+    if signal_idx is None:
+        return np.nan
+
+    n = len(df)
+    if signal_idx + 1 >= n:
+        return np.nan
+
+    sign = 1.0 if position == "long" else -1.0
+    c_signal = df.loc[signal_idx, CLOSE_COL]
+    c_next = df.loc[signal_idx + 1, CLOSE_COL]
+    pnl_pts = sign * (c_next - c_signal)
+    return float(pnl_pts)
+
+
 # ==========================
 # BACKTEST WITH TRAILING STOP
 # ==========================
@@ -208,6 +234,9 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                 r_mult = pnl / risk if risk != 0 else 0.0
 
+                # T(-1): enter at signal close, exit at next bar close
+                pts_Tm1 = calc_tminus1_profit(df, signal_idx, position)
+
                 # forward point profits T, T+1, ..., T+4
                 pts_T, pts_T1, pts_T2, pts_T3, pts_T4 = calc_forward_point_profits(
                     df, entry_idx, entry_price, position, max_horizon=4
@@ -231,6 +260,7 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "pnl": float(pnl),
                         "exit_reason": exit_reason,
                         "square_type": entry_square_type,
+                        "pts_Tm1": pts_Tm1,
                         "pts_T": pts_T,
                         "pts_T1": pts_T1,
                         "pts_T2": pts_T2,
@@ -545,7 +575,7 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
   </div>
 
   <div class="card">
-    <h2>All Trades (with forward point profits)</h2>
+    <h2>All Trades (with point profits around the signal)</h2>
     <table>
       <tr>
         <th>#</th>
@@ -557,7 +587,8 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <th>R</th>
         <th>Square type</th>
         <th>Exit reason</th>
-        <th>T (pts)</th>
+        <th>T(-1)</th>
+        <th>T</th>
         <th>T+1</th>
         <th>T+2</th>
         <th>T+3</th>
@@ -579,6 +610,7 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
         <td>{row['R']:.2f}</td>
         <td>{row['square_type']}</td>
         <td>{row['exit_reason']}</td>
+        <td>{row['pts_Tm1']:.2f}</td>
         <td>{row['pts_T']:.2f}</td>
         <td>{row['pts_T1']:.2f}</td>
         <td>{row['pts_T2']:.2f}</td>
