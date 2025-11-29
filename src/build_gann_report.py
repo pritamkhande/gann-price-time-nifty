@@ -220,7 +220,7 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
             if row.get("swing_low", False):
                 # check square formed from this swing to future index i
                 # find_square_from_swing_low returns (is_square, square_index)
-                is_sq, sq_idx = find_square_from_swing_low(df, i, MAX_LOOKAHEAD, CLOSE_COL)
+                is_sq, sq_idx = find_square_from_swing_low(df, i, DATE_COL, CLOSE_COL, MAX_LOOKAHEAD)
                 if is_sq:
                     # classification based on bar / day counts
                     swing_date = df.loc[i, DATE_COL]
@@ -261,7 +261,7 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                                 initial_stop_price = stop_price
                             # equity unchanged at entry
             elif row.get("swing_high", False):
-                is_sq, sq_idx = find_square_from_swing_high(df, i, MAX_LOOKAHEAD, CLOSE_COL)
+                is_sq, sq_idx = find_square_from_swing_high(df, i, DATE_COL, CLOSE_COL, MAX_LOOKAHEAD)
                 if is_sq:
                     swing_date = df.loc[i, DATE_COL]
                     sq_date = df.loc[sq_idx, DATE_COL]
