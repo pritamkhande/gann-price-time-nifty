@@ -1,13 +1,10 @@
 import os
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-
-def _ensure_dir(path: str) -> None:
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
+import plotly.graph_objects as go
 
 
 def make_equity_and_dd_plots(
@@ -17,43 +14,201 @@ def make_equity_and_dd_plots(
     out_equity_png: str,
     out_dd_png: str,
 ) -> None:
-    """Create equity curve and drawdown PNGs using matplotlib."""
-    if equity_col not in df.columns:
+    eq = df.dropna(subset=[equity_col])
+    if eq.empty:
         return
 
-    series = df[[date_col, equity_col]].dropna()
-    if series.empty:
-        return
+    dates = eq[date_col]
+    equity = eq[equity_col].values
 
-    dates = series[date_col]
-    equity = series[equity_col].astype(float).values
-
-    # Equity curve
-    _ensure_dir(out_equity_png)
-    plt.figure(figsize=(10, 4))
-    plt.plot(dates, equity, linewidth=1.5)
-    plt.title("Gann Squaring – Equity Curve")
+    # equity curve
+    plt.figure(figsize=(9, 4))
+    plt.plot(dates, equity)
+    plt.title("Gann Squaring – Equity Curve (Nifty)")
     plt.xlabel("Date")
     plt.ylabel("Equity (normalized)")
-    plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(out_equity_png, dpi=120)
+    plt.savefig(out_equity_png)
     plt.close()
 
-    # Drawdown
+    # drawdown
     peaks = np.maximum.accumulate(equity)
     dd = (equity - peaks) / peaks
 
-    _ensure_dir(out_dd_png)
-    plt.figure(figsize=(10, 3))
-    plt.plot(dates, dd * 100.0, linewidth=1.5)
-    plt.title("Drawdown (%) from Equity Peak")
+    plt.figure(figsize=(9, 3))
+    plt.plot(dates, dd)
+    plt.title("Drawdown")
     plt.xlabel("Date")
-    plt.ylabel("Drawdown %")
-    plt.grid(True, alpha=0.3)
+    plt.ylabel("Drawdown")
     plt.tight_layout()
-    plt.savefig(out_dd_png, dpi=120)
+    plt.savefig(out_dd_png)
     plt.close()
+
+
+def _build_trade_commentary(trade: pd.Series) -> str:
+    side = trade["position"]
+    r = trade["R"]
+    sq_type = trade.get("square_type", "")
+    exit_reason = trade["exit_reason"]
+    duration_bars = int(trade["exit_index"]) - int(trade["entry_index"])
+    dur_txt = f"{duration_bars} bars"
+
+    if r > 1.5:
+        perf = "strong winner"
+    elif r > 0:
+        perf = "modest winner"
+    elif r > -0.5:
+        perf = "small loss"
+    else:
+        perf = "larger loss"
+
+    sq_txt = {
+        "time": "Price–Time square (bars)",
+        "date": "Price–Date square (calendar days)",
+        "both": "Price–Time and Price–Date square in alignment",
+        None: "Gann square",
+        "": "Gann square",
+    }.get(sq_type, "Gann square")
+
+    return (
+        f"This {side} trade was triggered from a {sq_txt} setup. "
+        f"It stayed open for {dur_txt} and closed as a {perf} with {r:.2f}R. "
+        f"The exit happened due to '{exit_reason}' (stop/forced exit logic)."
+    )
+
+
+def create_trade_chart(
+    price_df: pd.DataFrame,
+    trade: pd.Series,
+    date_col: str,
+    open_col: str,
+    high_col: str,
+    low_col: str,
+    close_col: str,
+    out_html_path: str,
+    bars_before: int = 40,
+    bars_after: int = 20,
+) -> None:
+    """
+    Creates a Plotly candlestick chart around a single trade and writes a full
+    HTML page with chart + commentary.
+    """
+
+    entry_idx = int(trade["entry_index"])
+    exit_idx = int(trade["exit_index"])
+
+    start_idx = max(0, entry_idx - bars_before)
+    end_idx = min(len(price_df) - 1, exit_idx + bars_after)
+
+    sub = price_df.iloc[start_idx : end_idx + 1].copy()
+
+    fig = go.Figure(
+        data=[
+            go.Candlestick(
+                x=sub[date_col],
+                open=sub[open_col],
+                high=sub[high_col],
+                low=sub[low_col],
+                close=sub[close_col],
+                name="Nifty",
+            )
+        ]
+    )
+
+    # entry & exit markers
+    entry_row = price_df.iloc[entry_idx]
+    exit_row = price_df.iloc[exit_idx]
+
+    fig.add_trace(
+        go.Scatter(
+            x=[entry_row[date_col]],
+            y=[trade["entry_price"]],
+            mode="markers+text",
+            name="Entry",
+            marker=dict(symbol="triangle-up", size=12, color="green"),
+            text=["Entry"],
+            textposition="top center",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=[exit_row[date_col]],
+            y=[trade["exit_price"]],
+            mode="markers+text",
+            name="Exit",
+            marker=dict(symbol="triangle-down", size=12, color="red"),
+            text=["Exit"],
+            textposition="bottom center",
+        )
+    )
+
+    # initial stop line
+    fig.add_hline(
+        y=trade["initial_stop_price"],
+        line=dict(dash="dot", width=1),
+        annotation_text="Initial SL",
+        annotation_position="bottom left",
+    )
+
+    fig.update_layout(
+        title=f"Trade {int(trade['trade_no'])} – {trade['position']} ({trade['square_type']})",
+        xaxis_title="Date",
+        yaxis_title="Price",
+        xaxis_rangeslider_visible=False,
+        template="plotly_white",
+        margin=dict(l=40, r=20, t=60, b=40),
+        height=500,
+    )
+
+    # Build full HTML page with commentary
+    fig_html = fig.to_html(include_plotlyjs="cdn", full_html=False)
+    commentary = _build_trade_commentary(trade)
+    entry_date = trade["entry_date"].strftime("%d-%m-%Y")
+    exit_date = trade["exit_date"].strftime("%d-%m-%Y")
+    r = trade["R"]
+
+    full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Trade {int(trade['trade_no'])} – Gann Squaring (Nifty)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 16px;
+      background: #f7f7f9;
+      color: #111827;
+      line-height: 1.5;
+    }}
+    .card {{
+      background: #ffffff;
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+    }}
+  </style>
+</head>
+<body>
+  <h1>Trade {int(trade['trade_no'])} – Gann Squaring (Nifty)</h1>
+  <p><strong>{trade['position'].capitalize()}</strong> trade from {entry_date} to {exit_date}, result: {r:.2f}R.</p>
+  <div class="card">
+    <p>{commentary}</p>
+  </div>
+  <div class="card">
+    {fig_html}
+  </div>
+</body>
+</html>
+"""
+
+    os.makedirs(os.path.dirname(out_html_path), exist_ok=True)
+    with open(out_html_path, "w", encoding="utf-8") as f:
+        f.write(full_html)
 
 
 def generate_trade_charts(
@@ -66,131 +221,21 @@ def generate_trade_charts(
     close_col: str,
     out_dir: str = "docs/trades",
 ) -> None:
-    """Generate simple per-trade HTML + PNG charts."""
     if trades_df.empty:
         return
 
     os.makedirs(out_dir, exist_ok=True)
-    n = len(price_df)
 
-    for _, tr in trades_df.iterrows():
-        trade_no = int(tr["trade_no"])
-        sig_idx = int(tr["signal_index"])
-        entry_idx = int(tr["entry_index"])
-        exit_idx = int(tr["exit_index"])
-
-        start_idx = max(0, sig_idx - 30)
-        end_idx = min(n - 1, exit_idx + 10)
-
-        segment = price_df.loc[start_idx:end_idx].copy()
-        dates = segment[date_col]
-        closes = segment[close_col]
-
-        fig, ax = plt.subplots(figsize=(9, 4))
-        ax.plot(dates, closes, label="Close", linewidth=1.2)
-
-        entry_date = price_df.loc[entry_idx, date_col]
-        entry_close = price_df.loc[entry_idx, close_col]
-        exit_date = price_df.loc[exit_idx, date_col]
-        exit_close = price_df.loc[exit_idx, close_col]
-
-        side = tr["position"]
-        if side == "long":
-            ax.scatter(entry_date, entry_close, marker="^", s=80, label="Long entry")
-            ax.scatter(exit_date, exit_close, marker="v", s=70, label="Exit")
-        else:
-            ax.scatter(entry_date, entry_close, marker="v", s=80, label="Short entry")
-            ax.scatter(exit_date, exit_close, marker="^", s=70, label="Exit")
-
-        ax.set_title(f"Trade {trade_no} – {side} ({entry_date.date()} → {exit_date.date()})")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Close")
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
-        fig.autofmt_xdate()
-        plt.tight_layout()
-
-        png_name = f"trade_{trade_no:03d}.png"
-        html_name = f"trade_{trade_no:03d}.html"
-        png_path = os.path.join(out_dir, png_name)
-        html_path = os.path.join(out_dir, html_name)
-
-        plt.savefig(png_path, dpi=120)
-        plt.close(fig)
-
-        html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Trade {trade_no}</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#f7f7f9; padding:16px; }}
-    h1 {{ font-size: 20px; margin-bottom: 12px; }}
-    img {{ max-width: 100%; height: auto; border-radius: 8px; border: 1px solid #e5e7eb; }}
-  </style>
-</head>
-<body>
-  <h1>Trade {trade_no}</h1>
-  <p>Side: {side}, R = {tr['R']:.2f}</p>
-  <img src="{png_name}" alt="Trade {trade_no} chart">
-</body>
-</html>
-"""
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html)
-
-
-def make_signals_chart(
-    price_df: pd.DataFrame,
-    trades_df: pd.DataFrame,
-    date_col: str,
-    close_col: str,
-    out_png: str,
-) -> None:
-    """Create a single overview chart showing all signals on one price series."""
-    if price_df.empty:
-        return
-
-    _ensure_dir(out_png)
-
-    dates = price_df[date_col]
-    closes = price_df[close_col]
-
-    fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(dates, closes, linewidth=1.0, label="Close")
-
-    if not trades_df.empty:
-        for _, tr in trades_df.iterrows():
-            entry_idx = int(tr["entry_index"])
-            exit_idx = int(tr["exit_index"])
-            pos = tr["position"]
-
-            if 0 <= entry_idx < len(price_df):
-                de = price_df.loc[entry_idx, date_col]
-                ce = price_df.loc[entry_idx, close_col]
-            else:
-                continue
-
-            if 0 <= exit_idx < len(price_df):
-                dx = price_df.loc[exit_idx, date_col]
-                cx = price_df.loc[exit_idx, close_col]
-            else:
-                dx, cx = None, None
-
-            if pos == "long":
-                ax.scatter(de, ce, marker="^", s=40, color="green")
-            else:
-                ax.scatter(de, ce, marker="v", s=40, color="red")
-
-            if dx is not None:
-                ax.scatter(dx, cx, marker="x", s=35, color="blue")
-
-    ax.set_title("Price with all Gann entry/exit signals")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Close")
-    ax.grid(True, alpha=0.3)
-    fig.autofmt_xdate()
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=120)
-    plt.close()
+    for _, row in trades_df.iterrows():
+        trade_no = int(row["trade_no"])
+        out_html = os.path.join(out_dir, f"trade_{trade_no:03d}.html")
+        create_trade_chart(
+            price_df,
+            row,
+            date_col,
+            open_col,
+            high_col,
+            low_col,
+            close_col,
+            out_html,
+        )
