@@ -19,7 +19,7 @@ def make_equity_and_dd_plots(
 ) -> None:
     """Create equity curve and drawdown PNGs using matplotlib."""
     if equity_col not in df.columns:
-        raise ValueError(f"Column '{equity_col}' not in DataFrame")
+        return
 
     series = df[[date_col, equity_col]].dropna()
     if series.empty:
@@ -66,14 +66,7 @@ def generate_trade_charts(
     close_col: str,
     out_dir: str = "docs/trades",
 ) -> None:
-    """Generate simple per-trade HTML + PNG charts.
-
-    Each trade gets:
-      - PNG:  trade_XXX.png
-      - HTML: trade_XXX.html  (embedding the PNG)
-
-    Links in the main report use:  trades/trade_XXX.html
-    """
+    """Generate simple per-trade HTML + PNG charts."""
     if trades_df.empty:
         return
 
@@ -94,9 +87,8 @@ def generate_trade_charts(
         closes = segment[close_col]
 
         fig, ax = plt.subplots(figsize=(9, 4))
-        ax.plot(dates, closes, label="Close", linewidth=1.2, color="black")
+        ax.plot(dates, closes, label="Close", linewidth=1.2)
 
-        # Mark entry and exit
         entry_date = price_df.loc[entry_idx, date_col]
         entry_close = price_df.loc[entry_idx, close_col]
         exit_date = price_df.loc[exit_idx, date_col]
@@ -104,11 +96,11 @@ def generate_trade_charts(
 
         side = tr["position"]
         if side == "long":
-            ax.scatter(entry_date, entry_close, marker="^", s=80, color="green", label="Long entry")
-            ax.scatter(exit_date, exit_close, marker="v", s=70, color="red", label="Exit")
+            ax.scatter(entry_date, entry_close, marker="^", s=80, label="Long entry")
+            ax.scatter(exit_date, exit_close, marker="v", s=70, label="Exit")
         else:
-            ax.scatter(entry_date, entry_close, marker="v", s=80, color="red", label="Short entry")
-            ax.scatter(exit_date, exit_close, marker="^", s=70, color="green", label="Exit")
+            ax.scatter(entry_date, entry_close, marker="v", s=80, label="Short entry")
+            ax.scatter(exit_date, exit_close, marker="^", s=70, label="Exit")
 
         ax.set_title(f"Trade {trade_no} – {side} ({entry_date.date()} → {exit_date.date()})")
         ax.set_xlabel("Date")
@@ -126,8 +118,6 @@ def generate_trade_charts(
         plt.savefig(png_path, dpi=120)
         plt.close(fig)
 
-        # Simple HTML wrapper
-        rel_png = png_name  # relative to html file in same folder
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -143,7 +133,7 @@ def generate_trade_charts(
 <body>
   <h1>Trade {trade_no}</h1>
   <p>Side: {side}, R = {tr['R']:.2f}</p>
-  <img src="{rel_png}" alt="Trade {trade_no} chart">
+  <img src="{png_name}" alt="Trade {trade_no} chart">
 </body>
 </html>
 """
@@ -158,14 +148,7 @@ def make_signals_chart(
     close_col: str,
     out_png: str,
 ) -> None:
-    """Create a single overview chart showing all signals on one price series.
-
-    - Plots Close price over full history
-    - Marks all entries and exits:
-        long  entry: green ^
-        short entry: red v
-        exits: blue x
-    """
+    """Create a single overview chart showing all signals on one price series."""
     if price_df.empty:
         return
 
@@ -175,7 +158,7 @@ def make_signals_chart(
     closes = price_df[close_col]
 
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(dates, closes, linewidth=1.0, label="Close", color="black")
+    ax.plot(dates, closes, linewidth=1.0, label="Close")
 
     if not trades_df.empty:
         for _, tr in trades_df.iterrows():
@@ -210,4 +193,4 @@ def make_signals_chart(
     fig.autofmt_xdate()
     plt.tight_layout()
     plt.savefig(out_png, dpi=120)
-    plt.close(fig)
+    plt.close()
