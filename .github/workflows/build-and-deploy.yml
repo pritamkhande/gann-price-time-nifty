@@ -1,4 +1,4 @@
-name: Build Gann Report & Deploy to Pages
+name: Build Gann Reports & Deploy to Pages
 
 on:
   push:
@@ -33,10 +33,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build NIFTY Report
+      - name: Build NIFTY report
         run: python src/build_gann_report.py
 
-      - name: Build ALL STOCK Reports
+      - name: Build ALL STOCK reports
         run: python src/build_gann_stocks.py
 
       - name: Upload Pages artifact
@@ -47,12 +47,11 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4
