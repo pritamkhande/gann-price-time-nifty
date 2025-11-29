@@ -1,10 +1,11 @@
-name: Build Gann Report & Deploy to Pages
+name: Build Gann Reports & Deploy to Pages
 
 on:
   push:
     branches: [ "main" ]
+
   schedule:
-    - cron: "15 10 * * 1-5"   # 10:15 UTC, Mon–Fri
+    - cron: "15 10 * * 1-5"   # 10:15 UTC, Mon–Fri (after market close)
 
 permissions:
   contents: write
@@ -33,10 +34,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Gann backtest, charts & today scanner
+      - name: Run All Gann Systems (Nifty + All Stocks + Live Scanner)
         run: |
-          python src/build_gann_report.py
-          python src/scan_today.py
+          python src/build_gann_report.py        # NIFTY main report
+          python src/build_all_stocks.py         # ALL stocks reports
+          python src/scan_today.py               # Live early-signal scanner
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
