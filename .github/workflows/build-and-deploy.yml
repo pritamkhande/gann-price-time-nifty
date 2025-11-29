@@ -1,4 +1,4 @@
-name: Build Gann Reports & Deploy to Pages
+name: Build Gann Report & Deploy to Pages
 
 on:
   push:
@@ -33,11 +33,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build NIFTY report
-        run: python src/build_gann_report.py
-
-      - name: Build ALL STOCK reports
-        run: python src/build_gann_stocks.py
+      - name: Run Gann backtest, charts & today scanner
+        run: |
+          python src/build_gann_report.py
+          python src/scan_today.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
