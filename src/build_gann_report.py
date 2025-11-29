@@ -17,17 +17,22 @@ from typing import List, Dict, Tuple
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Re-use the core logic from your existing single-instrument script
-import build_gann_report as core
+# Import the core logic from the single-instrument script
+from build_gann_report import (
+    DATE_COL,
+    OPEN_COL,
+    HIGH_COL,
+    LOW_COL,
+    CLOSE_COL,
+    backtest,
+    compute_metrics,
+    build_system_commentary,
+)
 
-DATE_COL = core.DATE_COL
-OPEN_COL = core.OPEN_COL
-HIGH_COL = core.HIGH_COL
-LOW_COL = core.LOW_COL
-CLOSE_COL = core.CLOSE_COL
+RISK_PER_TRADE = 0.02  # 2% per trade, same logic as single-instrument script
 
-RISK_PER_TRADE = 0.02  # 2% per trade, same convention as in the main script
 
+# ---------- data loading ----------
 
 def load_upstox_eod(csv_path: str) -> Tuple[str, pd.DataFrame]:
     """
@@ -38,24 +43,22 @@ def load_upstox_eod(csv_path: str) -> Tuple[str, pd.DataFrame]:
     """
     df = pd.read_csv(csv_path)
     if "Symbol" not in df.columns or DATE_COL not in df.columns:
-        raise ValueError(f"{csv_path} is missing Symbol/Date columns")
+        raise ValueError(f"{csv_path} is missing Symbol or {DATE_COL} columns")
 
-    # Symbol is constant for the file; take first non-null
     symbol = str(df["Symbol"].dropna().iloc[0]).strip()
 
-    # Normalize date
     df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
     df = df.dropna(subset=[DATE_COL])
 
-    # Ensure numeric OHLC
     for col in [OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df = df.dropna(subset=[OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL])
     df = df.sort_values(DATE_COL).reset_index(drop=True)
-
     return symbol, df
 
+
+# ---------- equity & drawdown helper ----------
 
 def build_equity_and_drawdown(price_df: pd.DataFrame,
                               trades_df: pd.DataFrame) -> pd.DataFrame:
@@ -75,14 +78,12 @@ def build_equity_and_drawdown(price_df: pd.DataFrame,
     # Map exit date -> total R on that date (in case of multiple exits)
     r_by_date: Dict[pd.Timestamp, float] = {}
     if not trades_df.empty:
-        # Assume trades_df has columns "Exit date" and "R"
         for _, row in trades_df.iterrows():
             exit_date = pd.to_datetime(row["Exit date"])
             r_val = float(row["R"])
             r_by_date[exit_date] = r_by_date.get(exit_date, 0.0) + r_val
 
     for d in price_df[DATE_COL]:
-        # Apply any R realised on this date
         r_today = r_by_date.get(pd.to_datetime(d), 0.0)
         if r_today != 0.0:
             equity *= (1.0 + RISK_PER_TRADE * r_today)
@@ -91,9 +92,10 @@ def build_equity_and_drawdown(price_df: pd.DataFrame,
     price_df["equity"] = equity_series
     peak = price_df["equity"].cummax()
     price_df["drawdown_pct"] = (price_df["equity"] / peak - 1.0) * 100.0
-
     return price_df
 
+
+# ---------- plotting helpers ----------
 
 def plot_price_with_signals(
     symbol: str,
@@ -101,9 +103,7 @@ def plot_price_with_signals(
     trades_df: pd.DataFrame,
     out_path: str,
 ) -> None:
-    """
-    Simple price chart with long/short entries and exits marked.
-    """
+    """Simple price chart with long/short entries and exits marked."""
     if price_df.empty:
         return
 
@@ -111,14 +111,12 @@ def plot_price_with_signals(
     plt.plot(price_df[DATE_COL], price_df[CLOSE_COL], linewidth=1.0)
 
     if not trades_df.empty:
-        # Long entries: green up triangles; Short entries: red down triangles
         long_entries = trades_df[trades_df["Side"] == "long"]
         short_entries = trades_df[trades_df["Side"] == "short"]
 
         plt.plot(long_entries["Entry date"], long_entries["Entry price"], "^", markersize=5)
         plt.plot(short_entries["Entry date"], short_entries["Entry price"], "v", markersize=5)
 
-        # Exits as 'x'
         plt.plot(trades_df["Exit date"], trades_df["Exit price"], "x", markersize=4)
 
     plt.title(f"{symbol} – Close price with Gann signals")
@@ -135,10 +133,7 @@ def plot_equity_and_drawdown(
     out_equity_path: str,
     out_dd_path: str,
 ) -> None:
-    """
-    Plot equity curve and drawdown series from price_df which already
-    contains 'equity' and 'drawdown_pct' columns.
-    """
+    """Plot equity curve and drawdown series."""
     if price_df.empty or "equity" not in price_df.columns:
         return
 
@@ -163,6 +158,8 @@ def plot_equity_and_drawdown(
     plt.close()
 
 
+# ---------- HTML rendering ----------
+
 def render_stock_html(
     symbol: str,
     metrics: Dict[str, float],
@@ -172,15 +169,11 @@ def render_stock_html(
     equity_png: str,
     dd_png: str,
 ) -> str:
-    """
-    Render a per-stock HTML report.
-    """
-    # Relative paths (PNG files live in the same folder as HTML)
+    """Render a per-stock HTML report."""
     price_img = os.path.basename(price_png)
     eq_img = os.path.basename(equity_png)
     dd_img = os.path.basename(dd_png)
 
-    # Trades table rows
     rows_html: List[str] = []
     for i, row in trades_df.iterrows():
         rows_html.append(
@@ -217,15 +210,8 @@ def render_stock_html(
       margin: 0 auto;
       padding: 24px 16px 48px;
     }}
-    h1 {{
-      font-size: 28px;
-      margin-bottom: 4px;
-    }}
-    .subtitle {{
-      color: #4b5563;
-      font-size: 14px;
-      margin-bottom: 24px;
-    }}
+    h1 {{ font-size: 28px; margin-bottom: 4px; }}
+    .subtitle {{ color: #4b5563; font-size: 14px; margin-bottom: 24px; }}
     .cards {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -245,10 +231,7 @@ def render_stock_html(
       color: #6b7280;
       margin-bottom: 2px;
     }}
-    .card-value {{
-      font-size: 18px;
-      font-weight: 600;
-    }}
+    .card-value {{ font-size: 18px; font-weight: 600; }}
     .section {{
       background: white;
       border-radius: 12px;
@@ -256,11 +239,7 @@ def render_stock_html(
       box-shadow: 0 1px 3px rgba(15,23,42,0.08);
       margin-bottom: 20px;
     }}
-    .section h2 {{
-      font-size: 18px;
-      margin-top: 0;
-      margin-bottom: 6px;
-    }}
+    .section h2 {{ font-size: 18px; margin: 0 0 6px; }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -271,17 +250,13 @@ def render_stock_html(
       border-bottom: 1px solid #e5e7eb;
       text-align: right;
     }}
-    th:first-child, td:first-child {{
-      text-align: left;
-    }}
+    th:first-child, td:first-child {{ text-align: left; }}
     th {{
       background: #f9fafb;
       color: #4b5563;
       font-weight: 500;
     }}
-    tr:nth-child(even) td {{
-      background: #f9fafb;
-    }}
+    tr:nth-child(even) td {{ background: #f9fafb; }}
     img.chart {{
       max-width: 100%;
       height: auto;
@@ -296,11 +271,7 @@ def render_stock_html(
       color: #374151;
       white-space: pre-line;
     }}
-    a.back-link {{
-      font-size: 13px;
-      color: #2563eb;
-      text-decoration: none;
-    }}
+    a.back-link {{ font-size: 13px; color: #2563eb; text-decoration: none; }}
   </style>
 </head>
 <body>
@@ -383,9 +354,7 @@ def render_stock_html(
 
 
 def build_index_html(rows: List[Dict[str, str]], out_path: str) -> None:
-    """
-    Build landing page listing all symbols with last signal and stats.
-    """
+    """Landing page listing all symbols with last signal and stats."""
     rows_html = []
     for row in rows:
         rows_html.append(
@@ -420,15 +389,8 @@ def build_index_html(rows: List[Dict[str, str]], out_path: str) -> None:
       margin: 0 auto;
       padding: 24px 16px 48px;
     }}
-    h1 {{
-      font-size: 28px;
-      margin-bottom: 8px;
-    }}
-    .subtitle {{
-      color: #4b5563;
-      font-size: 14px;
-      margin-bottom: 20px;
-    }}
+    h1 {{ font-size: 28px; margin-bottom: 8px; }}
+    .subtitle {{ color: #4b5563; font-size: 14px; margin-bottom: 20px; }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -443,21 +405,14 @@ def build_index_html(rows: List[Dict[str, str]], out_path: str) -> None:
       border-bottom: 1px solid #e5e7eb;
       text-align: right;
     }}
-    th:first-child, td:first-child {{
-      text-align: left;
-    }}
+    th:first-child, td:first-child {{ text-align: left; }}
     th {{
       background: #f9fafb;
       color: #4b5563;
       font-weight: 500;
     }}
-    tr:nth-child(even) td {{
-      background: #f9fafb;
-    }}
-    a {{
-      color: #2563eb;
-      text-decoration: none;
-    }}
+    tr:nth-child(even) td {{ background: #f9fafb; }}
+    a {{ color: #2563eb; text-decoration: none; }}
   </style>
 </head>
 <body>
@@ -491,6 +446,8 @@ def build_index_html(rows: List[Dict[str, str]], out_path: str) -> None:
         f.write(html)
 
 
+# ---------- main ----------
+
 def main() -> None:
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     eod_dir = os.path.join(repo_root, "EOD_Upstox")
@@ -507,14 +464,10 @@ def main() -> None:
         if df.empty:
             continue
 
-        # Run core backtest logic from the existing module
-        trades_df, price_df = core.backtest(df)
+        trades_df, price_df = backtest(df)
+        metrics = compute_metrics(trades_df, price_df)
+        commentary = build_system_commentary(metrics, trades_df)
 
-        # Basic metrics & commentary (same helpers as Nifty script)
-        metrics = core.compute_metrics(trades_df, price_df)
-        commentary = core.build_system_commentary(metrics, trades_df)
-
-        # Build equity + drawdown and charts
         price_df_ed = build_equity_and_drawdown(price_df, trades_df)
 
         stock_dir = os.path.join(stocks_root, symbol)
@@ -527,33 +480,23 @@ def main() -> None:
         plot_price_with_signals(symbol, price_df, trades_df, price_png)
         plot_equity_and_drawdown(symbol, price_df_ed, equity_png, dd_png)
 
-        # Save trades CSV for this stock
         trades_csv_path = os.path.join(stock_dir, f"{symbol}_gann_trades.csv")
         trades_df.to_csv(trades_csv_path, index=False)
 
-        # Per-stock HTML
-        html = render_stock_html(
-            symbol=symbol,
-            metrics=metrics,
-            commentary=commentary,
-            trades_df=trades_df,
-            price_png=price_png,
-            equity_png=equity_png,
-            dd_png=dd_png,
-        )
         stock_html_path = os.path.join(stock_dir, "index.html")
+        html = render_stock_html(symbol, metrics, commentary, trades_df,
+                                 price_png, equity_png, dd_png)
         with open(stock_html_path, "w", encoding="utf-8") as f:
             f.write(html)
 
-        # Row for index page (latest completed signal)
         if trades_df.empty:
             last_side = "—"
             last_date_str = "—"
         else:
             last = trades_df.iloc[-1]
             last_side = str(last["Side"])
-            sd = last["Signal date"]
-            last_date_str = sd.date() if hasattr(sd, "date") else sd
+            sd = pd.to_datetime(last["Signal date"])
+            last_date_str = sd.date()
 
         index_rows.append(
             {
@@ -567,7 +510,6 @@ def main() -> None:
             }
         )
 
-    # Build landing page
     os.makedirs(docs_dir, exist_ok=True)
     index_html_path = os.path.join(docs_dir, "index.html")
     build_index_html(index_rows, index_html_path)
