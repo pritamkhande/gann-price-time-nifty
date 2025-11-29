@@ -1,4 +1,5 @@
-pandas
 numpy
+pandas
 matplotlib
 plotly
+kaleido
