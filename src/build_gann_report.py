@@ -45,33 +45,17 @@ os.makedirs("docs", exist_ok=True)
 def load_data() -> pd.DataFrame:
     df = pd.read_csv(DATA_PATH)
 
-    # --- normalise column names (strip spaces) ---
-    df.columns = [c.strip() for c in df.columns]
+    # parse dates from the 'Date' column
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL])
 
-    # --- find the real date column in the CSV ---
-    date_col_in_csv = None
-    if "Date" in df.columns:
-        date_col_in_csv = "Date"
-    elif "date" in df.columns:
-        date_col_in_csv = "date"
-    else:
-        raise ValueError(
-            f"CSV at {DATA_PATH} must have a 'Date' or 'date' column; got {list(df.columns)}"
-        )
-
-    # --- create a unified DATE_COL column ('Date') ---
-    df[DATE_COL] = pd.to_datetime(df[date_col_in_csv])
-    if date_col_in_csv != DATE_COL:
-        df.drop(columns=[date_col_in_csv], inplace=True)
-
-    # sort and clean numeric columns
+    # sort and reset index
     df = df.sort_values(DATE_COL).reset_index(drop=True)
 
+    # ensure price columns are numeric
     for c in [OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     return df
-
 
 
 def compute_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
