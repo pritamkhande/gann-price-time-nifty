@@ -33,7 +33,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Gann backtest, charts & today scanner
+      - name: Run Gann backtest for all stocks
         run: |
           python src/build_gann_report.py
           python src/scan_today.py
