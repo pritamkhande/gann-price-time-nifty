@@ -33,10 +33,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Gann backtest for all stocks
-        run: |
-          python src/build_gann_stocks.py
-          python src/scan_today.py
+      - name: Build NIFTY Report
+        run: python src/build_gann_report.py
+
+      - name: Build ALL STOCK Reports
+        run: python src/build_gann_stocks.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -46,6 +47,7 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
