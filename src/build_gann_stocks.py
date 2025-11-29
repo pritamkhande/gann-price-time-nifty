@@ -1,634 +1,439 @@
+# src/build_gann_stocks.py
+
 import os
-import glob
+from pathlib import Path
 from typing import List, Dict, Tuple
 
-import numpy as np
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
 
-from utils_swing import detect_swings
+# Reuse core Nifty logic
 from build_gann_report import (
     DATE_COL,
     OPEN_COL,
     HIGH_COL,
     LOW_COL,
     CLOSE_COL,
-    VOL_COL,
-    ATR_PERIOD,
-    RISK_PER_TRADE,
-    MAX_LOOKAHEAD,
-    compute_atr,
     backtest,
-    compute_metrics,
-    build_system_commentary,
 )
 
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 
-# -----------------------------
-# Load one Upstox EOD file
-# -----------------------------
 
-def load_upstox_eod(csv_path: str) -> Tuple[str, pd.DataFrame]:
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def load_nifty_df() -> Tuple[str, pd.DataFrame]:
     """
-    Expected columns (Upstox EOD):
+    Load Nifty from data/nifty_daily.csv and give it symbol 'NIFTY'.
+    """
+    csv_path = Path("data") / "nifty_daily.csv"
+    df = pd.read_csv(csv_path)
 
-        Symbol,Date,Open,High,Low,Close,Volume
+    df = df.rename(
+        columns={
+            "Date": DATE_COL,
+            "Open": OPEN_COL,
+            "High": HIGH_COL,
+            "Low": LOW_COL,
+            "Close": CLOSE_COL,
+        }
+    )
+    df["Symbol"] = "NIFTY"
+    return "NIFTY", df
 
-    Example:
-        20MICRONS,2008-10-06 00:00:00+05:30,40.0,40.0,15.8,16.82,23501730
+
+def load_stock_df(csv_path: Path) -> Tuple[str, pd.DataFrame]:
+    """
+    Load one stock from EOD_Upstox/*.csv
+    Expected columns: Symbol, Date, Open, High, Low, Close, Volume
     """
     df = pd.read_csv(csv_path)
 
-    if "Symbol" in df.columns and not df["Symbol"].dropna().empty:
-        symbol = str(df["Symbol"].dropna().iloc[0]).strip()
-    else:
-        symbol = os.path.basename(csv_path).replace("_EOD.csv", "")
+    # Date like 2008-10-06 00:00:00+05:30 -> keep only calendar date
+    df[DATE_COL] = pd.to_datetime(df["Date"]).dt.date
 
-    # Normalise column names
-    rename = {
-        "Date": DATE_COL,
-        "Open": OPEN_COL,
-        "High": HIGH_COL,
-        "Low": LOW_COL,
-        "Close": CLOSE_COL,
-        "Volume": VOL_COL,
-    }
-    df = df.rename(columns=rename)
+    df = df.rename(
+        columns={
+            "Open": OPEN_COL,
+            "High": HIGH_COL,
+            "Low": LOW_COL,
+            "Close": CLOSE_COL,
+        }
+    )
 
-    # Parse Date (Upstox gives timezone – strip it)
-    df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
-    try:
-        df[DATE_COL] = df[DATE_COL].dt.tz_localize(None)
-    except (AttributeError, TypeError):
-        try:
-            df[DATE_COL] = df[DATE_COL].dt.tz_convert(None)
-        except (AttributeError, TypeError):
-            pass
+    symbol = str(df["Symbol"].iloc[0]).strip()
+    df["Symbol"] = symbol
 
-    # Numeric OHLCV
-    for col in [OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    if VOL_COL in df.columns:
-        df[VOL_COL] = pd.to_numeric(df[VOL_COL], errors="coerce")
-
-    df = df.dropna(subset=[DATE_COL, OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL])
-    df = df.sort_values(DATE_COL).reset_index(drop=True)
-
-    return symbol, df
+    return symbol, df[[DATE_COL, OPEN_COL, HIGH_COL, LOW_COL, CLOSE_COL, "Symbol"]]
 
 
-# -----------------------------
-# Unified HTML for one stock
-# -----------------------------
+def compute_holding_point_profits(
+    trades: pd.DataFrame, price_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    For each completed trade, compute point P/L if we exit at:
+      T(-1): signal day close
+      T(0): entry day close
+      T(+1..+4): close 1..4 bars after entry
+    """
+    price_series = price_df.set_index(DATE_COL)[CLOSE_COL].sort_index()
 
-def render_stock_html(
-    symbol: str,
-    metrics: Dict,
+    offsets = [-1, 0, 1, 2, 3, 4]
+    colnames = ["T(-1)", "T", "T+1", "T+2", "T+3", "T+4"]
+
+    results: Dict[str, List[float]] = {c: [] for c in colnames}
+
+    for _, row in trades.iterrows():
+        entry_date = row["Entry date"]
+        entry_px = row["Entry price"]
+        side = row["Side"]
+
+        if pd.isna(entry_date) or entry_date not in price_series.index:
+            for c in colnames:
+                results[c].append(np.nan)
+            continue
+
+        idx = price_series.index.get_loc(entry_date)
+
+        for off, cname in zip(offsets, colnames):
+            idx2 = idx + off
+            if idx2 < 0 or idx2 >= len(price_series):
+                results[cname].append(np.nan)
+                continue
+
+            close_px = price_series.iloc[idx2]
+            pts = (close_px - entry_px) if side == "long" else (entry_px - close_px)
+            results[cname].append(round(float(pts), 2))
+
+    for cname in colnames:
+        trades[cname] = results[cname]
+
+    return trades
+
+
+# ---------------------------------------------------------------------
+# OHLC chart with all signals
+# ---------------------------------------------------------------------
+
+
+def plot_price_with_signals(
+    price_df: pd.DataFrame,
     trades_df: pd.DataFrame,
-    commentary: str,
-) -> str:
-    start = metrics.get("start_date")
-    end = metrics.get("end_date")
-    years = metrics.get("years", 0.0) or 0.0
+    out_png: Path,
+    title: str,
+) -> None:
+    """
+    Candlestick (OHLC) chart with all entry/exit markers.
 
-    if start is not None:
-        start_str = pd.to_datetime(start).strftime("%d-%m-%Y")
-    else:
-        start_str = "N/A"
-    if end is not None:
-        end_str = pd.to_datetime(end).strftime("%d-%m-%Y")
-    else:
-        end_str = "N/A"
+    - Candle = daily OHLC
+    - Up candle: Close >= Open
+    - Down candle: Close < Open
+    - Long entry: triangle up
+    - Short entry: triangle down
+    - Exit: X marker
+    """
+    ensure_dir(out_png.parent)
 
-    n_trades = metrics.get("n_trades", 0)
-    win_rate = metrics.get("win_rate", 0.0) or 0.0
-    avg_R = metrics.get("avg_R", 0.0) or 0.0
-    cagr = metrics.get("cagr", 0.0) or 0.0      # already in %
-    max_dd = metrics.get("max_dd", 0.0) or 0.0  # already in %
+    df = price_df.copy()
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL])
+    df = df.sort_values(DATE_COL)
 
-    # Build trades table rows
-    rows_html: List[str] = []
-    if trades_df.empty:
-        rows_html.append(
-            "<tr><td colspan='21' style='text-align:center;'>No trades for this instrument.</td></tr>"
+    dates = mdates.date2num(df[DATE_COL].to_list())
+    opens = df[OPEN_COL].to_numpy()
+    highs = df[HIGH_COL].to_numpy()
+    lows = df[LOW_COL].to_numpy()
+    closes = df[CLOSE_COL].to_numpy()
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+
+    # Draw candles
+    width = 0.6  # in days
+    for x, o, h, l, c in zip(dates, opens, highs, lows, closes):
+        color = "green" if c >= o else "red"
+
+        # High/low line
+        ax.vlines(x, l, h, color=color, linewidth=0.7)
+
+        # Body rectangle
+        body_low = min(o, c)
+        body_height = abs(c - o)
+        if body_height == 0:
+            body_height = 0.01  # tiny line if doji
+
+        rect = Rectangle(
+            (x - width / 2, body_low),
+            width,
+            body_height,
+            facecolor=color,
+            edgecolor=color,
+            linewidth=0.7,
         )
-    else:
-        for _, row in trades_df.iterrows():
-            trade_no = int(row.get("trade_no", 0))
+        ax.add_patch(rect)
 
-            sig_date = row.get("signal_date")
-            if pd.notna(sig_date):
-                sig_date_str = pd.to_datetime(sig_date).strftime("%Y-%m-%d")
+    # Overlay signals
+    for _, tr in trades_df.iterrows():
+        ed = tr["Entry date"]
+        ep = tr["Entry price"]
+        side = tr.get("Side", "")
+
+        if not pd.isna(ed):
+            x = mdates.date2num(pd.to_datetime(ed))
+            if side == "long":
+                ax.scatter(x, ep, marker="^", s=35, color="blue")
             else:
-                sig_date_str = "NA"
+                ax.scatter(x, ep, marker="v", s=35, color="black")
 
-            entry_date = row.get("entry_date")
-            entry_date_str = (
-                pd.to_datetime(entry_date).strftime("%Y-%m-%d")
-                if pd.notna(entry_date)
-                else "NA"
-            )
+        xd = tr.get("Exit date")
+        xp = tr.get("Exit price")
+        if not pd.isna(xd):
+            x2 = mdates.date2num(pd.to_datetime(xd))
+            ax.scatter(x2, xp, marker="x", s=30, color="orange")
 
-            exit_date = row.get("exit_date")
-            exit_date_str = (
-                pd.to_datetime(exit_date).strftime("%Y-%m-%d")
-                if pd.notna(exit_date)
-                else "NA"
-            )
+    ax.set_title(title)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.xaxis_date()
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    fig.autofmt_xdate()
 
-            def fmt(v, fmt_str="{:.2f}"):
-                if v is None:
-                    return ""
-                if isinstance(v, float) and np.isnan(v):
-                    return ""
-                try:
-                    return fmt_str.format(v)
-                except Exception:
-                    return str(v)
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=120)
+    plt.close(fig)
 
-            ec = row.get("early_close", np.nan)
-            mn_pts = row.get("margin_neutral_pts", np.nan)
-            mn_pct = row.get("margin_neutral_pct", np.nan)
-            mf_pts = row.get("margin_flip_pts", np.nan)
-            mf_pct = row.get("margin_flip_pct", np.nan)
 
-            rows_html.append(
-                f"<tr>"
-                f"<td>{trade_no}</td>"
-                f"<td>{sig_date_str}</td>"
-                f"<td>{entry_date_str}</td>"
-                f"<td>{fmt(row.get('entry_price'))}</td>"
-                f"<td>{exit_date_str}</td>"
-                f"<td>{fmt(row.get('exit_price'))}</td>"
-                f"<td>{row.get('position','')}</td>"
-                f"<td>{fmt(row.get('R'))}</td>"
-                f"<td>{row.get('square_type','')}</td>"
-                f"<td>{row.get('exit_reason','')}</td>"
-                f"<td>{fmt(row.get('pts_Tm1'))}</td>"
-                f"<td>{fmt(row.get('pts_T'))}</td>"
-                f"<td>{fmt(row.get('pts_T1'))}</td>"
-                f"<td>{fmt(row.get('pts_T2'))}</td>"
-                f"<td>{fmt(row.get('pts_T3'))}</td>"
-                f"<td>{fmt(row.get('pts_T4'))}</td>"
-                f"<td>{'' if np.isnan(ec) else fmt(ec)}</td>"
-                f"<td>{'' if np.isnan(mn_pts) else fmt(mn_pts)}</td>"
-                f"<td>{'' if np.isnan(mn_pct) else fmt(mn_pct) + '%'}</td>"
-                f"<td>{'' if np.isnan(mf_pts) else fmt(mf_pts)}</td>"
-                f"<td>{'' if np.isnan(mf_pct) else fmt(mf_pct) + '%'}</td>"
-                f"</tr>"
-            )
+# ---------------------------------------------------------------------
+# HTML helpers
+# ---------------------------------------------------------------------
 
-    trades_rows_str = "\n".join(rows_html)
 
-    html = f"""<!DOCTYPE html>
+def trades_to_html_table(trades: pd.DataFrame) -> str:
+    display_cols = [
+        "#",
+        "Signal date",
+        "Entry date",
+        "Entry price",
+        "Exit date",
+        "Exit price",
+        "Side",
+        "R",
+        "Square type",
+        "Exit reason",
+        "T(-1)",
+        "T",
+        "T+1",
+        "T+2",
+        "T+3",
+        "T+4",
+        "Early close",
+        "Margin neutral (pts)",
+        "Margin neutral (%)",
+        "Margin flip (pts)",
+        "Margin flip (%)",
+    ]
+
+    df = trades.copy()
+    df.insert(0, "#", range(1, len(df) + 1))
+    existing_cols = [c for c in display_cols if c in df.columns]
+    df = df[existing_cols]
+
+    html = df.to_html(
+        classes="table table-striped",
+        index=False,
+        border=0,
+        justify="center",
+        float_format=lambda x: f"{x:.2f}",
+    )
+    return html
+
+
+def stock_summary_row(
+    symbol: str, trades: pd.DataFrame, price_df: pd.DataFrame, rel_link: str
+) -> Dict[str, str]:
+    if trades.empty:
+        last_signal = "—"
+        last_side = "—"
+        last_date = "—"
+    else:
+        last = trades.iloc[-1]
+        last_signal = "Yes"
+        last_side = last["Side"]
+        last_date = last["Signal date"]
+
+    n_trades = len(trades)
+    win_rate = (trades["R"] > 0).mean() * 100 if n_trades > 0 else 0.0
+    avg_r = trades["R"].mean() if n_trades > 0 else 0.0
+
+    return {
+        "Symbol": symbol,
+        "Trades": str(n_trades),
+        "WinRate": f"{win_rate:.1f}%",
+        "AvgR": f"{avg_r:.2f}",
+        "LastSignalDate": str(last_date),
+        "LastSide": str(last_side),
+        "HasSignal": last_signal,
+        "Link": rel_link,
+    }
+
+
+def render_stock_page(
+    symbol: str,
+    trades: pd.DataFrame,
+    price_df: pd.DataFrame,
+    out_html: Path,
+    chart_rel_path: str,
+) -> None:
+    html_trades = trades_to_html_table(trades)
+
+    title = f"{symbol} – Gann Price–Time Squaring System"
+
+    body = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>{symbol} – Gann Price–Time Squaring Report</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Mechanical Gann Price–Time and Price–Date Squaring backtest on {symbol} daily data.">
-  <style>
-    :root {{
-      --bg: #f3f4f6;
-      --card-bg: #ffffff;
-      --border: #e5e7eb;
-      --text-main: #111827;
-      --text-muted: #6b7280;
-      --accent: #2563eb;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--text-main);
-    }}
-    .container {{
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 20px 12px 40px;
-    }}
-    a.back-link {{
-      display: inline-block;
-      margin-bottom: 8px;
-      font-size: 13px;
-      color: var(--accent);
-      text-decoration: none;
-    }}
-    h1 {{
-      font-size: 28px;
-      margin: 0 0 4px;
-    }}
-    .subtitle {{
-      color: var(--text-muted);
-      font-size: 14px;
-      margin-bottom: 18px;
-    }}
-    .grid-metrics {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 10px;
-      margin-bottom: 18px;
-    }}
-    .metric-card {{
-      background: var(--card-bg);
-      border-radius: 12px;
-      padding: 10px 12px;
-      border: 1px solid var(--border);
-      box-shadow: 0 1px 2px rgba(15,23,42,0.06);
-    }}
-    .metric-label {{
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-muted);
-      margin-bottom: 2px;
-    }}
-    .metric-value {{
-      font-size: 18px;
-      font-weight: 600;
-    }}
-    .section {{
-      background: var(--card-bg);
-      border-radius: 12px;
-      padding: 14px 16px;
-      border: 1px solid var(--border);
-      box-shadow: 0 1px 3px rgba(15,23,42,0.08);
-      margin-bottom: 16px;
-    }}
-    .section h2 {{
-      font-size: 18px;
-      margin: 0 0 6px;
-    }}
-    .section p {{
-      font-size: 13px;
-      margin: 4px 0;
-    }}
-    img.chart {{
-      max-width: 100%;
-      height: auto;
-      display: block;
-      margin-top: 6px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 11px;
-      margin-top: 4px;
-    }}
-    th, td {{
-      border-bottom: 1px solid var(--border);
-      padding: 4px 5px;
-      white-space: nowrap;
-      text-align: right;
-    }}
-    th:first-child, td:first-child {{
-      text-align: center;
-    }}
-    th:nth-child(2), td:nth-child(2),
-    th:nth-child(3), td:nth-child(3),
-    th:nth-child(5), td:nth-child(5) {{
-      text-align: center;
-    }}
-    th {{
-      background: #f9fafb;
-      color: var(--text-muted);
-      font-weight: 500;
-    }}
-    tr:nth-child(even) td {{
-      background: #f9fafb;
-    }}
-    .footer {{
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 20px;
-    }}
-    @media (max-width: 768px) {{
-      table {{ font-size: 10px; }}
-      .grid-metrics {{ grid-template-columns: repeat(2, minmax(0,1fr)); }}
-    }}
-  </style>
+  <title>{title}</title>
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  >
 </head>
-<body>
-  <div class="container">
-    <a href="../index.html" class="back-link">← All stocks</a>
-    <h1>{symbol} – Gann Price–Time Squaring System</h1>
-    <div class="subtitle">
-      Fully mechanical backtest of a W.D. Gann-inspired Price–Time / Price–Date Squaring idea
-      on daily data for <strong>{symbol}</strong>, from {start_str} to {end_str}.
+<body class="bg-light">
+  <div class="container my-4">
+    <h1 class="mb-3">{title}</h1>
+    <p>Fully mechanical backtest of the same Gann Price–Time / Price–Date Squaring system used for Nifty, applied to this stock.</p>
+
+    <h3 class="mt-4 mb-3">Price chart with all signals (OHLC)</h3>
+    <img src="{chart_rel_path}" class="img-fluid border" alt="Price with signals">
+
+    <h3 class="mt-5 mb-3">Completed trades (with T(-1)…T+4 & margins)</h3>
+    <div class="table-responsive">
+      {html_trades}
     </div>
 
-    <div class="grid-metrics">
-      <div class="metric-card">
-        <div class="metric-label">Number of trades</div>
-        <div class="metric-value">{n_trades}</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Win rate</div>
-        <div class="metric-value">{win_rate:.1f}%</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Average R per trade</div>
-        <div class="metric-value">{avg_R:.2f} R</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">CAGR (normalized equity)</div>
-        <div class="metric-value">{cagr:.1f}%</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Max drawdown</div>
-        <div class="metric-value">{max_dd:.1f}%</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">Test length</div>
-        <div class="metric-value">{years:.1f} yrs</div>
-      </div>
-    </div>
-
-    <div class="section">
-      <h2>System behaviour commentary</h2>
-      <p>{commentary}</p>
-    </div>
-
-    <div class="section">
-      <h2>Equity curve and drawdown</h2>
-      <p>Equity starts at 1.0 and changes based on realized R-multiples with {RISK_PER_TRADE*100:.0f}% risk per trade.</p>
-      <img src="gann_equity_curve.png" class="chart" alt="Equity curve">
-      <p style="margin-top:8px;">Drawdown relative to running equity peak:</p>
-      <img src="gann_drawdown_curve.png" class="chart" alt="Drawdown curve">
-    </div>
-
-    <div class="section">
-      <h2>Completed trades</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Signal</th>
-            <th>Entry</th>
-            <th>Entry Px</th>
-            <th>Exit</th>
-            <th>Exit Px</th>
-            <th>Side</th>
-            <th>R</th>
-            <th>Square</th>
-            <th>Exit reason</th>
-            <th>T(-1)</th>
-            <th>T</th>
-            <th>T+1</th>
-            <th>T+2</th>
-            <th>T+3</th>
-            <th>T+4</th>
-            <th>Early close</th>
-            <th>Margin neutral (pts)</th>
-            <th>Margin neutral (%)</th>
-            <th>Margin flip (pts)</th>
-            <th>Margin flip (%)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {trades_rows_str}
-        </tbody>
-      </table>
-    </div>
-
-    <div class="footer">
-      This is a research backtest. It ignores brokerage, slippage and execution constraints.
-      It is not trading or investment advice.
-    </div>
+    <p class="mt-4">
+      <a href="../index.html">&larr; Back to all stocks</a>
+      &nbsp;|&nbsp;
+      <a href="../../index.html">Back to Nifty system</a>
+    </p>
   </div>
 </body>
 </html>
 """
-    return html
+    ensure_dir(out_html.parent)
+    out_html.write_text(body, encoding="utf-8")
 
 
-# -----------------------------
-# Landing page (all stocks)
-# -----------------------------
+def render_master_stocks_index(rows: List[Dict[str, str]], out_html: Path) -> None:
+    rows_sorted = sorted(rows, key=lambda r: r["Symbol"])
 
-def render_index_html(rows: List[Dict]) -> str:
-    body_rows: List[str] = []
-
-    if not rows:
-        body_rows.append(
-            "<tr><td colspan='7' style='text-align:center;'>No stocks processed.</td></tr>"
-        )
-    else:
-        for r in rows:
-            sym = r["symbol"]
-            last_side = r.get("last_signal_side", "—")
-            last_date = r.get("last_signal_date", "—")
-            body_rows.append(
-                f"<tr>"
-                f"<td><a href='stocks/{sym}/index.html'>{sym}</a></td>"
-                f"<td>{last_side}</td>"
-                f"<td>{last_date}</td>"
-                f"<td>{int(r.get('num_trades', 0))}</td>"
-                f"<td>{float(r.get('win_rate', 0.0)):.1f}%</td>"
-                f"<td>{float(r.get('cagr', 0.0)):.1f}%</td>"
-                f"<td>{float(r.get('max_dd', 0.0)):.1f}%</td>"
-                f"</tr>"
-            )
-
-    rows_html = "\n".join(body_rows)
+    tr_html = ""
+    for r in rows_sorted:
+        tr_html += f"""
+        <tr>
+          <td><a href="{r['Link']}">{r['Symbol']}</a></td>
+          <td>{r['Trades']}</td>
+          <td>{r['WinRate']}</td>
+          <td>{r['AvgR']}</td>
+          <td>{r['HasSignal']}</td>
+          <td>{r['LastSide']}</td>
+          <td>{r['LastSignalDate']}</td>
+        </tr>
+        """
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>Gann Price–Time Squaring – All NSE Stocks</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root {{
-      --bg: #f3f4f6;
-      --card-bg: #ffffff;
-      --border: #e5e7eb;
-      --text-main: #111827;
-      --text-muted: #6b7280;
-      --accent: #2563eb;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--text-main);
-    }}
-    .container {{
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 20px 12px 40px;
-    }}
-    h1 {{
-      font-size: 28px;
-      margin: 0 0 6px;
-    }}
-    .subtitle {{
-      color: var(--text-muted);
-      font-size: 14px;
-      margin-bottom: 16px;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-      background: var(--card-bg);
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 1px 3px rgba(15,23,42,0.08);
-    }}
-    th, td {{
-      padding: 8px 10px;
-      border-bottom: 1px solid var(--border);
-      text-align: right;
-      white-space: nowrap;
-    }}
-    th:first-child, td:first-child {{
-      text-align: left;
-    }}
-    th {{
-      background: #f9fafb;
-      color: var(--text-muted);
-      font-weight: 500;
-    }}
-    tr:nth-child(even) td {{
-      background: #f9fafb;
-    }}
-    a {{
-      color: var(--accent);
-      text-decoration: none;
-    }}
-    a:hover {{
-      text-decoration: underline;
-    }}
-    @media (max-width: 768px) {{
-      table {{ font-size: 11px; }}
-    }}
-  </style>
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  >
 </head>
-<body>
-  <div class="container">
-    <h1>Gann Price–Time Squaring – All NSE Stocks</h1>
-    <div class="subtitle">
-      Each row shows the latest completed signal and key backtest stats.
-      Click a symbol to open its full report.
+<body class="bg-light">
+  <div class="container my-4">
+    <h1 class="mb-3">Gann Price–Time Squaring – All NSE Stocks</h1>
+    <p>Each row below is one NSE stock (including NIFTY). The system is identical to the Nifty backtest.</p>
+
+    <div class="table-responsive mt-4">
+      <table class="table table-striped table-hover align-middle">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th># trades</th>
+            <th>Win rate</th>
+            <th>Average R</th>
+            <th>Signal now?</th>
+            <th>Side</th>
+            <th>Last signal date</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tr_html}
+        </tbody>
+      </table>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th>Symbol</th>
-          <th>Last signal</th>
-          <th>Last signal date</th>
-          <th># trades</th>
-          <th>Win rate</th>
-          <th>CAGR</th>
-          <th>Max DD</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows_html}
-      </tbody>
-    </table>
+
+    <p class="mt-4">
+      <a href="../index.html">Back to Nifty main page</a>
+    </p>
   </div>
 </body>
 </html>
 """
-    return html
+    ensure_dir(out_html.parent)
+    out_html.write_text(html, encoding="utf-8")
 
 
-# -----------------------------
-# Main driver
-# -----------------------------
+# ---------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------
 
-def main() -> None:
-    # Resolve paths relative to repo root
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    eod_dir = os.path.join(repo_root, "EOD_Upstox")
-    docs_dir = os.path.join(repo_root, "docs")
-    stocks_root = os.path.join(docs_dir, "stocks")
 
-    os.makedirs(stocks_root, exist_ok=True)
+def process_one_symbol(symbol: str, df: pd.DataFrame, out_root: Path) -> Dict[str, str]:
+    df[DATE_COL] = pd.to_datetime(df[DATE_COL]).dt.date
 
-    csv_files = sorted(glob.glob(os.path.join(eod_dir, "*_EOD.csv")))
-    index_rows: List[Dict] = []
+    trades_df, price_df = backtest(df)
+    trades_df = compute_holding_point_profits(trades_df, price_df)
 
-    if not csv_files:
-        print("No *_EOD.csv files found in EOD_Upstox.")
-        return
+    stock_dir = out_root / symbol
+    chart_png = stock_dir / "price_signals.png"
+    plot_price_with_signals(
+        price_df, trades_df, chart_png, title=f"{symbol} – Price with Gann signals"
+    )
 
-    for csv_path in csv_files:
-        symbol, df = load_upstox_eod(csv_path)
-        if df.empty:
-            print(f"{symbol}: no valid rows, skipping.")
-            continue
+    rel_chart = "price_signals.png"
+    out_html = stock_dir / "index.html"
+    render_stock_page(symbol, trades_df, price_df, out_html, rel_chart)
 
-        # Same pipeline as Nifty: ATR + swings + backtest
-        df = compute_atr(df)
-        df = detect_swings(df, low_col=LOW_COL, high_col=HIGH_COL,
-                           lookback_main=1, lookback_fractal=2)
+    rel_link = f"{symbol}/index.html"
+    return stock_summary_row(symbol, trades_df, price_df, rel_link)
 
-        trades_df, price_df = backtest(df)
-        metrics = compute_metrics(trades_df, price_df)
-        commentary = build_system_commentary(metrics, trades_df)
 
-        # Build equity & drawdown PNGs for this stock
-        stock_dir = os.path.join(stocks_root, symbol)
-        os.makedirs(stock_dir, exist_ok=True)
-        equity_png = os.path.join(stock_dir, "gann_equity_curve.png")
-        dd_png = os.path.join(stock_dir, "gann_drawdown_curve.png")
+def main():
+    docs_root = Path("docs")
+    stocks_root = docs_root / "stocks"
+    ensure_dir(stocks_root)
 
-        # local import to avoid circular import at module import time
-        from utils_plot import make_equity_and_dd_plots
-        make_equity_and_dd_plots(price_df, DATE_COL, "equity", equity_png, dd_png)
+    all_rows: List[Dict[str, str]] = []
 
-        # Save trades CSV for this stock
-        trades_csv_path = os.path.join(stock_dir, f"{symbol}_gann_trades.csv")
-        trades_df.to_csv(trades_csv_path, index=False)
+    # 1) NIFTY
+    nifty_symbol, nifty_df = load_nifty_df()
+    all_rows.append(process_one_symbol(nifty_symbol, nifty_df, stocks_root))
 
-        # HTML report for this stock
-        html = render_stock_html(symbol, metrics, trades_df, commentary)
-        with open(os.path.join(stock_dir, "index.html"), "w", encoding="utf-8") as f:
-            f.write(html)
+    # 2) All NSE stocks from EOD_Upstox
+    eod_folder = Path("EOD_Upstox")
+    for csv_path in sorted(eod_folder.glob("*_EOD.csv")):
+        symbol, df = load_stock_df(csv_path)
+        all_rows.append(process_one_symbol(symbol, df, stocks_root))
 
-        # Data for landing page
-        if trades_df.empty:
-            last_side = "—"
-            last_date_str = "—"
-        else:
-            last = trades_df.iloc[-1]
-            last_side = last.get("position", "—")
-            last_dt = last.get("signal_date")
-            if pd.notna(last_dt):
-                last_date_str = pd.to_datetime(last_dt).strftime("%d-%m-%Y")
-            else:
-                last_date_str = "—"
-
-        index_rows.append(
-            {
-                "symbol": symbol,
-                "last_signal_side": last_side,
-                "last_signal_date": last_date_str,
-                "num_trades": metrics.get("n_trades", 0),
-                "win_rate": metrics.get("win_rate", 0.0),
-                "cagr": metrics.get("cagr", 0.0),
-                "max_dd": metrics.get("max_dd", 0.0),
-            }
-        )
-
-        print(
-            f"{symbol}: trades={metrics.get('n_trades', 0)}, "
-            f"win_rate={metrics.get('win_rate', 0.0):.1f}%"
-        )
-
-    # Build global landing page
-    os.makedirs(docs_dir, exist_ok=True)
-    index_html = render_index_html(index_rows)
-    with open(os.path.join(docs_dir, "index.html"), "w", encoding="utf-8") as f:
-        f.write(index_html)
-
-    print("Landing page written to docs/index.html")
+    render_master_stocks_index(all_rows, stocks_root / "index.html")
 
 
 if __name__ == "__main__":
