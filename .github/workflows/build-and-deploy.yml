@@ -35,7 +35,7 @@ jobs:
 
       - name: Run Gann backtest for all stocks
         run: |
-          python src/build_gann_report.py
+          python src/build_gann_stocks.py
           python src/scan_today.py
 
       - name: Upload Pages artifact
