@@ -1,147 +1,115 @@
-import math
-from datetime import datetime
 from typing import Optional, Tuple
 
 import pandas as pd
 
+# extended square numbers: classic + some extended variants
+SQUARE_NUMBERS = [25, 36, 49, 64, 81, 100, 121, 50, 72, 98, 128]
 
-GANN_SQUARE_LEVELS = [25, 36, 49, 64, 81, 100, 121, 50, 72, 98, 128]
+
+def is_square_number(n: int, tol: int = 4) -> bool:
+    for s in SQUARE_NUMBERS:
+        if abs(n - s) <= tol:
+            return True
+    return False
 
 
-def _classify_square(
-    dP: float,
-    d_bars: int,
-    d_days: int,
-    slope_tol: float,
-) -> Optional[Tuple[str, float]]:
+def classify_square(
+    delta_points: float,
+    delta_bars: int,
+    delta_days: int,
+    slope_tol: float = 0.25,
+    tol_bars: int = 4,
+    tol_days: int = 4,
+) -> Optional[str]:
     """
-    Decide if (dP, d_bars, d_days) forms a Gann-like square.
+    Decide whether we have:
+    - time-based square (bars)
+    - date-based square (calendar days)
+    - both
 
-    Returns:
-      (square_type, error_score) or None
+    Returns "time", "date", "both" or None.
     """
-    if dP <= 0:
+    if delta_bars <= 0 or delta_days <= 0:
         return None
 
-    best_type = None
-    best_err = float("inf")
+    slope_bars = delta_points / delta_bars
+    slope_days = delta_points / delta_days
 
-    # Price-Time (bars)
-    if d_bars > 0:
-        ratio_bt = dP / d_bars
-        err_bt = abs(ratio_bt - 1.0)
-        if err_bt <= slope_tol and err_bt < best_err:
-            best_type = "price_time"
-            best_err = err_bt
+    time_ok = (abs(slope_bars - 1.0) <= slope_tol) and is_square_number(
+        delta_bars, tol_bars
+    )
+    date_ok = (abs(slope_days - 1.0) <= slope_tol) and is_square_number(
+        delta_days, tol_days
+    )
 
-    # Price-Date (calendar days)
-    if d_days > 0:
-        ratio_dd = dP / d_days
-        err_dd = abs(ratio_dd - 1.0)
-        if err_dd <= slope_tol and err_dd < best_err:
-            best_type = "price_date"
-            best_err = err_dd
-
-    # Prefer around known Gann square numbers for dP
-    # (this is a soft filter; we do not require it, but we reward closeness)
-    if best_type is not None:
-        nearest_square = min(GANN_SQUARE_LEVELS, key=lambda x: abs(x - dP))
-        square_err = abs(nearest_square - dP) / max(nearest_square, 1.0)
-        # combine errors: geometric-like mix
-        total_err = best_err + 0.5 * square_err
-        return best_type, total_err
-
+    if time_ok and date_ok:
+        return "both"
+    if time_ok:
+        return "time"
+    if date_ok:
+        return "date"
     return None
-
-
-def _scan_forward_for_square(
-    df: pd.DataFrame,
-    start_idx: int,
-    date_col: str,
-    close_col: str,
-    slope_tol: float,
-    max_lookahead: int,
-    direction: str,
-) -> Tuple[Optional[int], Optional[str]]:
-    """
-    Generic forward scanner for squares from a swing point.
-
-    direction: "up" or "down"
-    """
-    n = len(df)
-    base_close = float(df.loc[start_idx, close_col])
-    base_date = df.loc[start_idx, date_col]
-
-    best_idx = None
-    best_type = None
-    best_err = float("inf")
-
-    max_idx = min(n - 1, start_idx + max_lookahead)
-
-    for j in range(start_idx + 1, max_idx + 1):
-        c = float(df.loc[j, close_col])
-        if direction == "up" and c <= base_close:
-            continue
-        if direction == "down" and c >= base_close:
-            continue
-
-        dP = abs(c - base_close)
-        d_bars = j - start_idx
-        d_days = (df.loc[j, date_col] - base_date).days
-
-        res = _classify_square(dP, d_bars, d_days, slope_tol)
-        if res is None:
-            continue
-        sq_type, err = res
-        if err < best_err:
-            best_err = err
-            best_type = sq_type
-            best_idx = j
-
-    return best_idx, best_type
 
 
 def find_square_from_swing_low(
     df: pd.DataFrame,
-    swing_idx: int,
+    i0: int,
     date_col: str,
     close_col: str,
-    slope_tol: float,
-    max_lookahead: int,
+    slope_tol: float = 0.25,
+    max_lookahead: int = 160,
 ) -> Tuple[Optional[int], Optional[str]]:
     """
-    From a swing low, scan forward for an up-move that forms
-    a Gann-like price-time / price-date square.
+    From swing low at index i0, look forward for first up-move
+    where price-time and/or price-date is squared.
+    Return (index, square_type) or (None, None).
     """
-    return _scan_forward_for_square(
-        df,
-        swing_idx,
-        date_col=date_col,
-        close_col=close_col,
-        slope_tol=slope_tol,
-        max_lookahead=max_lookahead,
-        direction="up",
-    )
+    n = len(df)
+    p0 = df.loc[i0, close_col]
+    d0 = df.loc[i0, date_col]
+
+    for t in range(i0 + 5, min(i0 + max_lookahead, n)):
+        delta_bars = t - i0
+        d_t = df.loc[t, date_col]
+        delta_days = (d_t - d0).days
+        delta_p = df.loc[t, close_col] - p0
+        if delta_p <= 0:
+            continue
+
+        sq_type = classify_square(abs(delta_p), delta_bars, delta_days, slope_tol)
+        if sq_type is not None:
+            return t, sq_type
+
+    return None, None
 
 
 def find_square_from_swing_high(
     df: pd.DataFrame,
-    swing_idx: int,
+    i0: int,
     date_col: str,
     close_col: str,
-    slope_tol: float,
-    max_lookahead: int,
+    slope_tol: float = 0.25,
+    max_lookahead: int = 160,
 ) -> Tuple[Optional[int], Optional[str]]:
     """
-    From a swing high, scan forward for a down-move that forms
-    a Gann-like price-time / price-date square.
+    From swing high at index i0, look forward for first down-move
+    where price-time and/or price-date is squared.
+    Return (index, square_type) or (None, None).
     """
-    return _scan_forward_for_square(
-        df,
-        swing_idx,
-        date_col=date_col,
-        close_col=close_col,
-        slope_tol=slope_tol,
-        max_lookahead=max_lookahead,
-        direction="down",
-    )
+    n = len(df)
+    p0 = df.loc[i0, close_col]
+    d0 = df.loc[i0, date_col]
+
+    for t in range(i0 + 5, min(i0 + max_lookahead, n)):
+        delta_bars = t - i0
+        d_t = df.loc[t, date_col]
+        delta_days = (d_t - d0).days
+        delta_p = df.loc[t, close_col] - p0
+        if delta_p >= 0:
+            continue
+
+        sq_type = classify_square(abs(delta_p), delta_bars, delta_days, slope_tol)
+        if sq_type is not None:
+            return t, sq_type
+
+    return None, None
