@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 
@@ -9,45 +10,49 @@ def detect_swings(
     lookback_fractal: int = 2,
 ) -> pd.DataFrame:
     """
-    Detect swing highs and lows using:
-    - Tight +/- lookback_main pivot
-    - Williams-style fractal with lookback_fractal (e.g. 2 → 5-bar fractal)
+    Detects swing highs/lows with two logics:
+    - main: local min/max over +/- lookback_main bars (default 1 → many swings)
+    - fractal: Williams-style +/- lookback_fractal bars
 
     Adds boolean columns:
-      - swing_high
-      - swing_low
+      swing_low, swing_high
     """
+
     n = len(df)
-    highs = df[high_col].values
     lows = df[low_col].values
+    highs = df[high_col].values
 
-    swing_high = [False] * n
-    swing_low = [False] * n
+    swing_low_main = np.zeros(n, dtype=bool)
+    swing_high_main = np.zeros(n, dtype=bool)
+    swing_low_fractal = np.zeros(n, dtype=bool)
+    swing_high_fractal = np.zeros(n, dtype=bool)
 
-    # Tight pivots
+    # main +/- lookback_main
     for i in range(lookback_main, n - lookback_main):
-        window_h = highs[i - lookback_main : i + lookback_main + 1]
-        window_l = lows[i - lookback_main : i + lookback_main + 1]
-        h = highs[i]
-        l = lows[i]
-        if h == max(window_h) and window_h.tolist().count(h) == 1:
-            swing_high[i] = True
-        if l == min(window_l) and window_l.tolist().count(l) == 1:
-            swing_low[i] = True
+        window_lows = lows[i - lookback_main : i + lookback_main + 1]
+        window_highs = highs[i - lookback_main : i + lookback_main + 1]
 
-    # Fractals (5-bar if lookback_fractal=2)
-    if lookback_fractal > 0:
-        for i in range(lookback_fractal, n - lookback_fractal):
-            window_h = highs[i - lookback_fractal : i + lookback_fractal + 1]
-            window_l = lows[i - lookback_fractal : i + lookback_fractal + 1]
-            h = highs[i]
-            l = lows[i]
-            if h == max(window_h) and window_h.tolist().count(h) == 1:
-                swing_high[i] = True or swing_high[i]
-            if l == min(window_l) and window_l.tolist().count(l) == 1:
-                swing_low[i] = True or swing_low[i]
+        if lows[i] == window_lows.min():
+            swing_low_main[i] = True
+        if highs[i] == window_highs.max():
+            swing_high_main[i] = True
+
+    # fractal +/- lookback_fractal
+    for i in range(lookback_fractal, n - lookback_fractal):
+        left_lows = lows[i - lookback_fractal : i]
+        right_lows = lows[i + 1 : i + 1 + lookback_fractal]
+        left_highs = highs[i - lookback_fractal : i]
+        right_highs = highs[i + 1 : i + 1 + lookback_fractal]
+
+        if lows[i] < left_lows.min() and lows[i] < right_lows.min():
+            swing_low_fractal[i] = True
+        if highs[i] > left_highs.max() and highs[i] > right_highs.max():
+            swing_high_fractal[i] = True
+
+    swing_low = swing_low_main | swing_low_fractal
+    swing_high = swing_high_main | swing_high_fractal
 
     df = df.copy()
-    df["swing_high"] = swing_high
     df["swing_low"] = swing_low
+    df["swing_high"] = swing_high
     return df
