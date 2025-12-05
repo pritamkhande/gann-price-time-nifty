@@ -13,7 +13,6 @@ from utils_plot import make_equity_and_dd_plots, generate_trade_charts
 # ==========================
 
 DATA_PATH = "data/nifty_daily.csv"
-EARLY_DATA_PATH = "Early_Data/nifty_early_close.csv"  # early close data
 
 DATE_COL = "Date"
 OPEN_COL = "Open"
@@ -63,89 +62,6 @@ def compute_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.DataFrame:
     return df
 
 
-def load_early_close() -> pd.DataFrame | None:
-    """
-    Load early close data (~10–15 minutes before market close) if available.
-
-    Expected CSV format (Early_Data/nifty_early_close.csv):
-
-        Date,EarlyClose
-        01-01-2000,1450.25
-        03-01-2000,1462.10
-        ...
-
-    Date must match main data by calendar date.
-    """
-    if not os.path.exists(EARLY_DATA_PATH):
-        return None
-
-    edf = pd.read_csv(EARLY_DATA_PATH)
-    edf[DATE_COL] = pd.to_datetime(edf[DATE_COL], dayfirst=True, errors="coerce")
-    edf = edf.dropna(subset=[DATE_COL, "EarlyClose"])
-    edf = edf.sort_values(DATE_COL).reset_index(drop=True)
-    return edf
-
-
-# ==========================
-# HELPERS – POINT PROFITS AROUND SIGNAL
-# ==========================
-
-def calc_forward_point_profits(
-    df: pd.DataFrame,
-    entry_idx: int,
-    entry_price: float,
-    position: str,
-    max_horizon: int = 4,
-) -> list[float]:
-    """
-    For a given entry, compute profit in points if we exit at:
-      T   = entry day close
-      T+1 = close on next bar
-      ...
-      T+4 = close 4 bars after entry
-    Returns list [pts_T, pts_T1, pts_T2, pts_T3, pts_T4]
-    """
-    sign = 1.0 if position == "long" else -1.0
-    pnls = []
-    n = len(df)
-
-    for k in range(0, max_horizon + 1):
-        idx = entry_idx + k
-        if idx >= n:
-            pnls.append(np.nan)
-        else:
-            close_k = df.loc[idx, CLOSE_COL]
-            pnl_pts = sign * (close_k - entry_price)
-            pnls.append(float(pnl_pts))
-    return pnls
-
-
-def calc_tminus1_profit(
-    df: pd.DataFrame,
-    signal_idx: int | None,
-    position: str,
-) -> float:
-    """
-    Profit in points if we hypothetically:
-      - ENTER at signal bar close (where square is detected)
-      - EXIT at next bar close (the bar where we actually enter at open)
-
-    This is labelled T(-1).
-    """
-    if signal_idx is None:
-        return np.nan
-
-    n = len(df)
-    if signal_idx + 1 >= n:
-        return np.nan
-
-    sign = 1.0 if position == "long" else -1.0
-    c_signal = df.loc[signal_idx, CLOSE_COL]
-    c_next = df.loc[signal_idx + 1, CLOSE_COL]
-    pnl_pts = sign * (c_next - c_signal)
-    return float(pnl_pts)
-
-
 # ==========================
 # BACKTEST WITH TRAILING STOP
 # ==========================
@@ -159,8 +75,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     stop_price = None
     initial_stop_price = None
     entry_square_type = None
-    signal_idx = None
-    signal_date = None
 
     trades = []
 
@@ -185,8 +99,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         sl = df.loc[sq_idx, HIGH_COL] + 2 * df.loc[sq_idx, "ATR"]
                         stop_price = sl
                         initial_stop_price = sl
-                        signal_idx = sq_idx
-                        signal_date = df.loc[sq_idx, DATE_COL]
                         i = entry_idx
                         continue
 
@@ -206,8 +118,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         sl = df.loc[sq_idx, LOW_COL] - 2 * df.loc[sq_idx, "ATR"]
                         stop_price = sl
                         initial_stop_price = sl
-                        signal_idx = sq_idx
-                        signal_date = df.loc[sq_idx, DATE_COL]
                         i = entry_idx
                         continue
 
@@ -258,19 +168,9 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
                 r_mult = pnl / risk if risk != 0 else 0.0
 
-                # T(-1): enter at signal close, exit at next bar close
-                pts_Tm1 = calc_tminus1_profit(df, signal_idx, position)
-
-                # forward point profits T, T+1, ..., T+4
-                pts_T, pts_T1, pts_T2, pts_T3, pts_T4 = calc_forward_point_profits(
-                    df, entry_idx, entry_price, position, max_horizon=4
-                )
-
                 trades.append(
                     {
                         "trade_no": len(trades) + 1,
-                        "signal_index": signal_idx,
-                        "signal_date": signal_date,
                         "entry_index": entry_idx,
                         "exit_index": i,
                         "entry_date": df.loc[entry_idx, DATE_COL],
@@ -284,12 +184,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "pnl": float(pnl),
                         "exit_reason": exit_reason,
                         "square_type": entry_square_type,
-                        "pts_Tm1": pts_Tm1,
-                        "pts_T": pts_T,
-                        "pts_T1": pts_T1,
-                        "pts_T2": pts_T2,
-                        "pts_T3": pts_T3,
-                        "pts_T4": pts_T4,
                     }
                 )
 
@@ -304,8 +198,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                 stop_price = None
                 initial_stop_price = None
                 entry_square_type = None
-                signal_idx = None
-                signal_date = None
 
             i += 1
 
@@ -327,75 +219,6 @@ def backtest(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         df.loc[idx, "equity"] = equity
 
     return trades_df, df
-
-
-# ==========================
-# EARLY-CLOSE MARGINS
-# ==========================
-
-def attach_early_margins(
-    trades_df: pd.DataFrame,
-    price_df: pd.DataFrame,
-    early_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    For each trade, compute:
-
-    - early_close: approx. close 10–15 min before final close on the entry bar
-    - margin_neutral_pts / margin_neutral_pct:
-        how much price can move before today's signal is lost (long->neutral or short->neutral)
-    - margin_flip_pts / margin_flip_pct:
-        how much price must move to flip bias to the opposite side (long->short or short->long)
-    """
-    early_map = early_df.set_index(DATE_COL)["EarlyClose"]
-
-    early_closes = []
-    m_neutral_pts = []
-    m_neutral_pct = []
-    m_flip_pts = []
-    m_flip_pct = []
-
-    for _, tr in trades_df.iterrows():
-        entry_date = tr["entry_date"]
-        pos = tr["position"]
-        sig_idx = int(tr["signal_index"])
-
-        ec = early_map.get(entry_date, np.nan)
-        early_closes.append(ec)
-
-        if pd.isna(ec):
-            m_neutral_pts.append(np.nan)
-            m_neutral_pct.append(np.nan)
-            m_flip_pts.append(np.nan)
-            m_flip_pct.append(np.nan)
-            continue
-
-        sq_high = price_df.loc[sig_idx, HIGH_COL]
-        sq_low = price_df.loc[sig_idx, LOW_COL]
-
-        if pos == "long":
-            # margin before long loses confirmation (back to neutral)
-            buf_neutral_pts = ec - sq_high
-            # margin required to go below square low (strong short zone)
-            buf_flip_pts = ec - sq_low
-        else:  # short
-            # margin before short loses confirmation (back to neutral)
-            buf_neutral_pts = sq_low - ec
-            # margin required to go above square high (strong long zone)
-            buf_flip_pts = sq_high - ec
-
-        m_neutral_pts.append(float(buf_neutral_pts))
-        m_flip_pts.append(float(buf_flip_pts))
-        m_neutral_pct.append(100.0 * buf_neutral_pts / ec)
-        m_flip_pct.append(100.0 * buf_flip_pts / ec)
-
-    trades_df = trades_df.copy()
-    trades_df["early_close"] = early_closes
-    trades_df["margin_neutral_pts"] = m_neutral_pts
-    trades_df["margin_neutral_pct"] = m_neutral_pct
-    trades_df["margin_flip_pts"] = m_flip_pts
-    trades_df["margin_flip_pct"] = m_flip_pct
-    return trades_df
 
 
 # ==========================
@@ -540,14 +363,12 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
       width: 100%;
       border-collapse: collapse;
       margin-top: 8px;
-      font-size: 13px;
-      table-layout: auto;
+      font-size: 14px;
     }}
     th, td {{
       padding: 6px 8px;
       border-bottom: 1px solid #e5e7eb;
       text-align: left;
-      white-space: nowrap;
     }}
     th {{
       background: #f3f4f6;
@@ -668,64 +489,31 @@ def render_html(metrics: dict, trades_df: pd.DataFrame, commentary: str) -> str:
   </div>
 
   <div class="card">
-    <h2>All Trades (point profits + early-close margins)</h2>
+    <h2>Sample Trades (first 10)</h2>
     <table>
       <tr>
         <th>#</th>
-        <th>Signal date</th>
         <th>Entry date</th>
-        <th>Entry price</th>
         <th>Exit date</th>
         <th>Side</th>
         <th>R</th>
         <th>Square type</th>
         <th>Exit reason</th>
-        <th>T(-1)</th>
-        <th>T</th>
-        <th>T+1</th>
-        <th>T+2</th>
-        <th>T+3</th>
-        <th>T+4</th>
-        <th>Early close</th>
-        <th>Margin neutral (pts)</th>
-        <th>Margin neutral (%)</th>
-        <th>Margin flip (pts)</th>
-        <th>Margin flip (%)</th>
         <th>Chart</th>
       </tr>
 """
-    for _, row in trades_df.iterrows():
+    sample = trades_df.head(10)
+    for _, row in sample.iterrows():
         trade_no = int(row["trade_no"])
-        sig_date = row["signal_date"].strftime('%Y-%m-%d') if pd.notna(row["signal_date"]) else "NA"
-
-        ec = row.get("early_close", np.nan)
-        mn_pts = row.get("margin_neutral_pts", np.nan)
-        mn_pct = row.get("margin_neutral_pct", np.nan)
-        mf_pts = row.get("margin_flip_pts", np.nan)
-        mf_pct = row.get("margin_flip_pct", np.nan)
-
         html += f"""
       <tr>
         <td>{trade_no}</td>
-        <td>{sig_date}</td>
         <td>{row['entry_date'].strftime('%Y-%m-%d')}</td>
-        <td>{row['entry_price']:.2f}</td>
         <td>{row['exit_date'].strftime('%Y-%m-%d')}</td>
         <td>{row['position']}</td>
         <td>{row['R']:.2f}</td>
         <td>{row['square_type']}</td>
         <td>{row['exit_reason']}</td>
-        <td>{row['pts_Tm1']:.2f}</td>
-        <td>{row['pts_T']:.2f}</td>
-        <td>{row['pts_T1']:.2f}</td>
-        <td>{row['pts_T2']:.2f}</td>
-        <td>{row['pts_T3']:.2f}</td>
-        <td>{row['pts_T4']:.2f}</td>
-        <td>{"" if pd.isna(ec) else f"{ec:.2f}"}</td>
-        <td>{"" if pd.isna(mn_pts) else f"{mn_pts:.2f}"}</td>
-        <td>{"" if pd.isna(mn_pct) else f"{mn_pct:.2f}%"}</td>
-        <td>{"" if pd.isna(mf_pts) else f"{mf_pts:.2f}"}</td>
-        <td>{"" if pd.isna(mf_pct) else f"{mf_pct:.2f}%"}</td>
         <td><a class="trade-link" href="trades/trade_{trade_no:03d}.html" target="_blank">View</a></td>
       </tr>
 """
@@ -755,12 +543,6 @@ def main():
     df = detect_swings(df, low_col=LOW_COL, high_col=HIGH_COL, lookback_main=1, lookback_fractal=2)
 
     trades_df, price_df = backtest(df)
-
-    # Attach early-close margins if Early_Data is available
-    early_df = load_early_close()
-    if early_df is not None:
-        trades_df = attach_early_margins(trades_df, price_df, early_df)
-
     trades_df.to_csv(OUT_TRADES_CSV, index=False)
 
     metrics = compute_metrics(trades_df, price_df)
